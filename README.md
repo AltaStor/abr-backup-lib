@@ -70,14 +70,21 @@ encryption algorithm, full/incremental).
 
 ## Building
 
+This repository vendors [google/crc32c](https://github.com/google/crc32c)
+as a submodule fallback, so clone it with submodules (or run
+`git submodule update --init --recursive` after a plain clone):
+
 ```sh
+git clone --recurse-submodules <repo-url>
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j
 ```
 
-Dependencies: AWS SDK for C++ (`core`, `s3`), OpenSSL, Zstd, and Crc32c
-(found via CMake packages where available, otherwise looked up as plain
-libraries). Build options:
+Dependencies: AWS SDK for C++ (`core`, `s3`), OpenSSL, Zstd, and Crc32c.
+Crc32c is resolved in order: an installed CMake package, a plain system
+library, and finally the bundled [third_party/crc32c](third_party/crc32c)
+submodule built from source (the `crc32c` static library only — its own
+tests/benchmarks are skipped). Build options:
 
 - `ABR_BACKUP_BUILD_TESTS` (default `ON`) — build the `btest` utility.
 - `ABR_BACKUP_BUILD_UNIT_TESTS` (default `ON`) — build the GoogleTest unit
