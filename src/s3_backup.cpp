@@ -17,7 +17,6 @@
 #include <aws/s3/model/ListObjectsV2Request.h>
 #include <aws/s3/model/PutObjectRequest.h>
 #include <aws/s3/model/DeleteObjectRequest.h>
-
 #include <aws/s3/model/CreateMultipartUploadRequest.h>
 #include <aws/s3/model/HeadBucketRequest.h>
 #include <aws/s3/model/CreateBucketRequest.h>
@@ -194,11 +193,6 @@ bool Abr::S3BackupManager::initialize(const Abr::BackupManagerParams& params)
 
 //
 // Make sure the target bucket exists before any object operation is attempted.
-//
-// Without this, a missing bucket only surfaces deep inside createFile() as a
-// confusing "CreateMultipartUpload failed: Bucket not found" followed by an
-// "invalid file name" error. Here we probe with HeadBucket and, when the caller
-// asked for it (backup / repository provisioning paths), create the bucket.
 //
 bool Abr::S3BackupManager::ensureBucket(const std::string &bucket)
 {
@@ -626,7 +620,43 @@ bool Abr::S3Backup::closeFile(Handle hFile, bool bDelete)
     }
 
     bool ok = true;
-    if (pFile->m_isMultiPart) {
+    if (pFile->m_isMultiPart && pFile->m_parts.empty()) {
+        // Nothing was ever written to this data file: the image held no data at
+        // all, or a no-change incremental found nothing to store. S3 refuses to
+        // complete an upload without a single part, so the upload is released
+        // and the empty data file is written as a plain object instead. A backup
+        // that stored nothing is a backup like any other, and every one of them
+        // has a data file that opens.
+        Aws::S3::Model::AbortMultipartUploadRequest abortRequest;
+        abortRequest.SetBucket(m_pManager->getFolder());
+        abortRequest.SetKey(pFile->m_filename);
+        abortRequest.SetUploadId(pFile->m_uploadID);
+
+        auto abortOutcome = pClient->AbortMultipartUpload(abortRequest);
+
+        if (!abortOutcome.IsSuccess()) {
+            // The upload holds no part, so nothing of it is stored or billed, and
+            // whatever is left of it is released by the next deleteBackup(). The
+            // object written below is what the backup is made of, so a failure to
+            // tidy up here must not turn it into a failed backup.
+            std::cerr << "Warning: the empty data upload of '" << pFile->m_filename
+                      << "' stays pending until the backup is deleted: "
+                      << abortOutcome.GetError().GetMessage() << std::endl;
+        }
+
+        Aws::S3::Model::PutObjectRequest request;
+        request.SetBucket(m_pManager->getFolder());
+        request.SetKey(pFile->m_filename);
+        request.SetBody(Aws::MakeShared<Aws::StringStream>("PutObjectEmptyBuffer",
+                std::stringstream::in | std::stringstream::out | std::stringstream::binary));
+
+        auto outcome = pClient->PutObject(request);
+
+        if (!outcome.IsSuccess()) {
+            std::cerr << "Error: putObject: " << outcome.GetError().GetMessage() << std::endl;
+            ok = false;
+        }
+    } else if (pFile->m_isMultiPart) {
         Aws::S3::Model::CompletedMultipartUpload completedMultipartUpload;
         completedMultipartUpload.SetParts(pFile->m_parts);
 

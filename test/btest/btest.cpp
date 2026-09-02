@@ -297,6 +297,14 @@ int main(int argc, char* argv[])
         params.m_size = sizeof(params);
         params.m_createFolderIfMissing = bCreateFolder;
         params.m_folder = argv[1];
+        params.m_pathStyle = true; // Use path-style addressing for S3 buckets
+
+        if (std::getenv("AWS_PROFILE")) {
+            params.m_profile = std::getenv("AWS_PROFILE");
+        } else {
+            std::cerr << "AWS_PROFILE is not set!" << std::endl;
+            return 1;
+        }
 
         backupManager = Abr::createBackupManager("s3", params);
     }

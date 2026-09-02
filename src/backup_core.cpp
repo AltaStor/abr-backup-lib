@@ -797,26 +797,24 @@ bool Abr::RestoreCore::open(const std::string &path, const std::string &name, co
     m_numIndexRecords = indexHeader.index_count;
     uint32_t indexSize = m_numIndexRecords * Abr::INDEX_FILE_RECORD_SIZE;
 
-    // A no-change incremental is a valid backup with zero index records and no data file
-    if (m_numIndexRecords == 0) {
-        closeFile(hIndexFile);
-        return true;
-    }
+    // Read indexes. A backup that stored nothing - an image without any data, or
+    // a no-change incremental - has none of them, and is a valid backup with an
+    // empty data file.
+    if (m_numIndexRecords) {
+        m_pIndexRecords = new (std::nothrow) Abr::IndexRecord[m_numIndexRecords];
+        if (!m_pIndexRecords) {
+            std::cerr << "Memory alloc error!\n";
+            closeFile(hIndexFile);
+            return false;
+        }
 
-    // Read indexes
-    m_pIndexRecords = new (std::nothrow) Abr::IndexRecord[m_numIndexRecords];
-    if (!m_pIndexRecords) {
-        std::cerr << "Memory alloc error!\n";
-        closeFile(hIndexFile);
-        return false;
-    }
-
-    if (!readFile(hIndexFile, m_pIndexRecords, indexHeader.index_offset, indexSize)) {
-        std::cerr << "Failed to read index records from file " << indexPath << std::endl;
-        delete[] m_pIndexRecords;
-        m_pIndexRecords = nullptr;
-        closeFile(hIndexFile);
-        return false;
+        if (!readFile(hIndexFile, m_pIndexRecords, indexHeader.index_offset, indexSize)) {
+            std::cerr << "Failed to read index records from file " << indexPath << std::endl;
+            delete[] m_pIndexRecords;
+            m_pIndexRecords = nullptr;
+            closeFile(hIndexFile);
+            return false;
+        }
     }
 
     closeFile(hIndexFile);

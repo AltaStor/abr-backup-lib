@@ -260,6 +260,95 @@ namespace
         EXPECT_TRUE(restore->close());
     }
 
+    //
+    // A backup can end up with no range at all in two ways: everything it was
+    // given was empty and the empty block elimination dropped it, or it was
+    // never given anything, which is what a no-change incremental looks like.
+    // Both are valid backups made of an index without records and an empty data
+    // file, and both have to round trip like any other backup.
+    //
+
+    TEST_F(FileBackupManagerTest, ABackupOfAnAllZeroImageRoundTripsThroughTheFilesystem)
+    {
+        auto manager = openManager();
+        ASSERT_NE(manager, nullptr);
+
+        ASSERT_NO_FATAL_FAILURE(writeBackup(manager, std::vector<char>(0x2000, 0)));
+
+        const fs::path indexPath = tempDir.path() / kPath / (kName + Abr::INDEX_FILE_EXT);
+        const fs::path dataPath = tempDir.path() / kPath / (kName + Abr::DATA_FILE_EXT);
+
+        // The index is a header without a single record, and the data file is
+        // there and empty rather than missing.
+        ASSERT_TRUE(fs::exists(indexPath));
+        ASSERT_TRUE(fs::exists(dataPath));
+        EXPECT_EQ(fs::file_size(indexPath), Abr::INDEX_FILE_HEADER_SIZE);
+        EXPECT_EQ(fs::file_size(dataPath), 0u);
+
+        std::vector<std::string> backups;
+        ASSERT_TRUE(manager->listBackups(kPath, backups));
+        EXPECT_EQ(backups, (std::vector<std::string>{ kName }));
+
+        std::shared_ptr<Abr::IRestore> restore;
+        ASSERT_TRUE(manager->openBackup(kPath, kName, restore));
+
+        std::vector<Abr::Range> ranges;
+        ASSERT_TRUE(restore->getDataRanges(ranges));
+        EXPECT_TRUE(ranges.empty());
+
+        const auto &info = restore->getInfo();
+        EXPECT_EQ(info.sectors, defaultInfo().sectors);
+        EXPECT_EQ(info.orig_data_size, 0u);
+        EXPECT_EQ(info.stored_data_size, 0u);
+
+        // There is no range to ask for, so the restore and the verify path both
+        // have to turn a request down instead of reading the empty data file.
+        std::vector<char> loaded(0x1000, 0);
+        std::vector<char> tempBuf;
+        EXPECT_FALSE(restore->loadDataRange(0, loaded.data(), loaded.size(), 0));
+        EXPECT_FALSE(restore->checkDataRange(0, tempBuf));
+
+        EXPECT_TRUE(restore->close());
+
+        EXPECT_TRUE(manager->deleteBackup(kPath, kName));
+        EXPECT_FALSE(fs::exists(indexPath));
+        EXPECT_FALSE(fs::exists(dataPath));
+    }
+
+    TEST_F(FileBackupManagerTest, ABackupThatWasGivenNothingRoundTripsThroughTheFilesystem)
+    {
+        auto manager = openManager();
+        ASSERT_NE(manager, nullptr);
+
+        // What a no-change incremental writes: created and committed without a
+        // single saveDataRange() call.
+        Abr::BackupInfo info = defaultInfo();
+        info.incremental = true;
+
+        std::shared_ptr<Abr::IBackup> backup;
+        ASSERT_TRUE(manager->createBackup(kPath, kName, info, backup));
+        ASSERT_TRUE(backup->finalizeBackup());
+        backup.reset();
+
+        const fs::path dataPath = tempDir.path() / kPath / (kName + Abr::DATA_FILE_EXT);
+        ASSERT_TRUE(fs::exists(dataPath));
+        EXPECT_EQ(fs::file_size(dataPath), 0u);
+
+        std::shared_ptr<Abr::IRestore> restore;
+        ASSERT_TRUE(manager->openBackup(kPath, kName, restore));
+
+        std::vector<Abr::Range> ranges;
+        ASSERT_TRUE(restore->getDataRanges(ranges));
+        EXPECT_TRUE(ranges.empty());
+        EXPECT_TRUE(restore->getInfo().incremental);
+
+        // remove() takes the empty data file with it, the same way it does for a
+        // backup that stored something.
+        EXPECT_TRUE(restore->remove());
+        EXPECT_FALSE(fs::exists(tempDir.path() / kPath / (kName + Abr::INDEX_FILE_EXT)));
+        EXPECT_FALSE(fs::exists(dataPath));
+    }
+
     TEST_F(FileBackupManagerTest, TheBackupFilesAreNotReadableByOthers)
     {
         auto manager = openManager();

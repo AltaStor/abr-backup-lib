@@ -163,10 +163,12 @@ namespace
 
     TEST_F(RestoreCoreTest, OpenSucceedsForABackupWithoutAnyRecords)
     {
-        // A backup whose data was entirely empty has no records and no data to
-        // read, so it must open without its data file being needed at all.
+        // A backup whose data was entirely empty has no index record, but it is
+        // a backup like any other: its data file is empty, not absent, and it is
+        // opened the same way.
         writeBackup(ut::defaultInfo(), { { 0, std::vector<char>(0x2000, 0) } });
-        repo.files.erase(dataFile());
+        ASSERT_TRUE(repo.has(dataFile()));
+        ASSERT_EQ(repo.sizeOf(dataFile()), 0u);
 
         auto restore = newRestore();
         ASSERT_TRUE(restore->open(kPath, kName));
@@ -175,6 +177,50 @@ namespace
         EXPECT_TRUE(restore->getDataRanges(ranges));
         EXPECT_TRUE(ranges.empty());
         EXPECT_EQ(restore->indexRecordCount(), 0u);
+
+        EXPECT_TRUE(restore->close());
+    }
+
+    TEST_F(RestoreCoreTest, OpenFailsWhenTheDataFileOfAnEmptyBackupIsMissing)
+    {
+        // The empty data file is part of the backup, so a repository that lost it
+        // is as broken as one that lost the data of a backup that stored something.
+        writeBackup(ut::defaultInfo(), { { 0, std::vector<char>(0x2000, 0) } });
+        repo.files.erase(dataFile());
+
+        ut::CerrCapture cerr;
+        EXPECT_FALSE(newRestore()->open(kPath, kName));
+        EXPECT_TRUE(cerr.contains("Failed to open data file")) << cerr.text();
+    }
+
+    TEST_F(RestoreCoreTest, LoadAndCheckAreRefusedForABackupWithoutAnyRecords)
+    {
+        // There is no range to ask for, so both the restore and the verify path
+        // have to turn the request down instead of reading the empty data file.
+        writeBackup(ut::defaultInfo(), { { 0, std::vector<char>(0x2000, 0) } });
+
+        auto restore = newRestore();
+        ASSERT_TRUE(restore->open(kPath, kName));
+
+        std::vector<char> loaded(0x1000, 0);
+        std::vector<char> tempBuf;
+
+        EXPECT_FALSE(restore->loadDataRange(0, loaded.data(), loaded.size(), 0));
+        EXPECT_FALSE(restore->checkDataRange(0, tempBuf));
+
+        EXPECT_TRUE(restore->close());
+    }
+
+    TEST_F(RestoreCoreTest, RemoveDeletesTheEmptyDataFileOfABackupWithoutAnyRecords)
+    {
+        writeBackup(ut::defaultInfo(), { { 0, std::vector<char>(0x2000, 0) } });
+
+        auto restore = newRestore();
+        ASSERT_TRUE(restore->open(kPath, kName));
+
+        EXPECT_TRUE(restore->remove());
+        EXPECT_FALSE(repo.has(indexFile()));
+        EXPECT_FALSE(repo.has(dataFile()));
     }
 
     //
