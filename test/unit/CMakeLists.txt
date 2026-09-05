@@ -34,6 +34,7 @@ add_executable(abr_unit_tests
     test_encryption.cpp
     test_file_backup_manager.cpp
     test_backup_manager_factory.cpp
+    test_immutability.cpp
 )
 
 target_include_directories(abr_unit_tests

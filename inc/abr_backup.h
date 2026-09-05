@@ -12,6 +12,12 @@
 
 namespace Abr
 {
+    enum ImmutabilityMode {
+        NONE = 0,
+        GOVERNANCE = 1,
+        COMPLIANCE = 2
+    };
+
     struct BackupInfo {
         uint64_t sectors; // total number of sectors in the original data
 
@@ -32,6 +38,10 @@ namespace Abr
         // 0 - full, 1 - incremental. An incremental holds only the blocks that
         // changed since its parent, so it is not restorable on its own.
         uint8_t incremental;
+
+        ImmutabilityMode m_immutabilityMode; // immutability mode of the backup, if any
+
+        int m_immutabilityDays; // retention period of the backup, in days, if any
 
         uint64_t orig_data_size; // total size of the original data in bytes
 
@@ -90,6 +100,15 @@ namespace Abr
         std::string m_folder; // folder path or bucket name
     };
 
+    struct BackupFolderInfo
+    {
+        ImmutabilityMode m_immutabilitySupported = ImmutabilityMode::NONE;
+        
+        ImmutabilityMode m_immutabilityCurrent = ImmutabilityMode::NONE;
+
+        int m_immutabilityDays = 0; // how long new backups are retained, in days
+    };
+
     //
     // Interface of a backup manager
     //
@@ -114,6 +133,13 @@ namespace Abr
 
         virtual bool deleteBackup(const std::string &path, const std::string &name) = 0;
 
+        virtual void getFolderInfo(const std::string &path, BackupFolderInfo &info) {
+            // default implementation assumes no immutability support
+            info.m_immutabilitySupported = ImmutabilityMode::NONE;
+            info.m_immutabilityCurrent = ImmutabilityMode::NONE;
+            info.m_immutabilityDays = 0;
+        };
+         
         const std::string& getFolder() const {
             return m_folder;
         }

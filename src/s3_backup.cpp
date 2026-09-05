@@ -22,6 +22,7 @@
 #include <aws/s3/model/CreateBucketRequest.h>
 #include <aws/s3/model/BucketLocationConstraint.h>
 #include <aws/s3/model/GetObjectAttributesRequest.h>
+#include <aws/s3/model/GetObjectLockConfigurationRequest.h>
 #include <aws/s3/model/UploadPartRequest.h>
 #include <aws/s3/model/CompleteMultipartUploadRequest.h>
 #include <aws/s3/model/AbortMultipartUploadRequest.h>
@@ -185,6 +186,196 @@ bool Abr::S3BackupManager::initialize(const Abr::BackupManagerParams& params)
     m_folder = params.m_folder;
 
     if (!ensureBucket(m_folder)) {
+        return false;
+    }
+
+    if (!checkImmutability(m_folder)) {
+        return false;
+    }
+
+    return true;
+}
+
+void Abr::S3BackupManager::getFolderInfo(const std::string &path, BackupFolderInfo &info)
+{
+    info.m_immutabilitySupported = m_params.m_immutabilitySupported;
+    info.m_immutabilityCurrent = m_params.m_immutabilityCurrent;
+    info.m_immutabilityDays = m_params.m_immutabilityDays;
+}
+
+namespace
+{
+    Abr::ImmutabilityMode toImmutabilityMode(Aws::S3::Model::ObjectLockRetentionMode mode)
+    {
+        switch (mode) {
+        case Aws::S3::Model::ObjectLockRetentionMode::GOVERNANCE:
+            return Abr::ImmutabilityMode::GOVERNANCE;
+        case Aws::S3::Model::ObjectLockRetentionMode::COMPLIANCE:
+            return Abr::ImmutabilityMode::COMPLIANCE;
+        default:
+            return Abr::ImmutabilityMode::NONE;
+        }
+    }
+
+    // Retention periods only ever appear in days here, so a period reads the
+    // same way wherever it is reported.
+    std::string retentionPeriodName(int days)
+    {
+        return std::to_string(days) + " day(s)";
+    }
+}
+
+const char *Abr::immutabilityModeName(ImmutabilityMode mode)
+{
+    switch (mode) {
+    case ImmutabilityMode::GOVERNANCE:
+        return "governance";
+    case ImmutabilityMode::COMPLIANCE:
+        return "compliance";
+    default:
+        return "none";
+    }
+}
+
+//
+// What new backups written to this bucket really get.
+//
+void Abr::S3BackupManager::resolveImmutability(const ObjectLockSettings &settings, BackupFolderInfo &effective)
+{
+    effective.m_immutabilitySupported = ImmutabilityMode::NONE;
+    effective.m_immutabilityCurrent = ImmutabilityMode::NONE;
+    effective.m_immutabilityDays = 0;
+
+    if (!settings.m_enabled) {
+        return;
+    }
+
+    // Object Lock is a bucket wide switch. Once on, an object may be
+    // retained in either mode, and compliance is the stronger of the two.
+    effective.m_immutabilitySupported = ImmutabilityMode::COMPLIANCE;
+
+    // Backups are uploaded without per object retention headers, so what they
+    // actually get is the default retention rule.
+    effective.m_immutabilityCurrent = settings.m_defaultMode;
+    effective.m_immutabilityDays = settings.m_days;
+
+    // Neither half of the rule is worth anything without the other: a mode with
+    // no period retains nothing, and a period with no mode is not enforced. A
+    // bucket with Object Lock on but no usable rule keeps its backups
+    // deletable, and has to say so.
+    if (effective.m_immutabilityCurrent == ImmutabilityMode::NONE || effective.m_immutabilityDays <= 0) {
+        effective.m_immutabilityCurrent = ImmutabilityMode::NONE;
+        effective.m_immutabilityDays = 0;
+    }
+}
+
+//
+// Whether that is enough for what was asked for.
+//
+bool Abr::S3BackupManager::honoursImmutabilityRequest(const BackupFolderInfo &effective,
+                                                      const ImmutabilityRequest &request,
+                                                      std::string &reason)
+{
+    reason.clear();
+
+    if (request.m_mode == ImmutabilityMode::NONE) {
+        // Nothing was asked for, so whatever the bucket does is acceptable.
+        return true;
+    }
+
+    if (effective.m_immutabilitySupported < request.m_mode) {
+        reason = std::string("does not support ") + immutabilityModeName(request.m_mode) + " immutability";
+        return false;
+    }
+
+    // Immutability being available is not enough. Since backups carry no
+    // retention of their own, the default retention rule has to hand them at
+    // least the mode and the period that were asked for.
+    if (effective.m_immutabilityCurrent < request.m_mode) {
+        reason = effective.m_immutabilityCurrent == ImmutabilityMode::NONE
+            ? std::string("applies no immutability to new backups")
+            : std::string("applies ") + immutabilityModeName(effective.m_immutabilityCurrent)
+                  + " immutability to new backups";
+
+        reason += std::string(", while ") + immutabilityModeName(request.m_mode) + " was requested";
+        return false;
+    }
+
+    if (effective.m_immutabilityDays < request.m_days) {
+        reason = "retains new backups for " + retentionPeriodName(effective.m_immutabilityDays)
+            + ", less than the requested " + retentionPeriodName(request.m_days);
+        return false;
+    }
+
+    return true;
+}
+
+//
+// Find out whether the bucket can hold immutable backups at all, and in which
+// mode and for how long new backups would be retained.
+//
+bool Abr::S3BackupManager::checkImmutability(const std::string &bucket)
+{
+    // What the caller asked for. The probe below replaces the fields with what
+    // the bucket really applies, so the request is kept aside for validation.
+    ImmutabilityRequest request;
+
+    request.m_mode = m_params.m_immutabilityCurrent;
+    request.m_days = m_params.m_immutabilityDays;
+
+    ObjectLockSettings settings;
+
+    Aws::S3::Model::GetObjectLockConfigurationRequest lockRequest;
+    lockRequest.SetBucket(bucket);
+
+    auto outcome = m_s3_client->GetObjectLockConfiguration(lockRequest);
+
+    if (outcome.IsSuccess()) {
+        const auto &lockConfig = outcome.GetResult().GetObjectLockConfiguration();
+        const auto &retention = lockConfig.GetRule().GetDefaultRetention();
+
+        settings.m_enabled = lockConfig.GetObjectLockEnabled() == Aws::S3::Model::ObjectLockEnabled::Enabled;
+        settings.m_defaultMode = toImmutabilityMode(retention.GetMode());
+
+        // A rule states its period in days or in calendar years, never in both,
+        // and everything past this point counts in days. A year is taken as 365
+        // of them, which is enough to order two periods; the exact retain until
+        // date is still the bucket's to compute.
+        settings.m_days = retention.GetYears() > 0 ? retention.GetYears() * 365 : retention.GetDays();
+    } else {
+        // Object Lock is optional: a bucket created without it answers
+        // ObjectLockConfigurationNotFoundError, and S3 compatible targets that
+        // do not implement the API at all answer NotImplemented or
+        // MethodNotAllowed. Neither is a reason to fail a backup that does not
+        // need immutability, so it is only reported when one was requested.
+        if (request.m_mode != ImmutabilityMode::NONE) {
+            const auto &err = outcome.GetError();
+            std::cerr << "Failed to read the Object Lock configuration of S3 bucket '" << bucket << "'"
+                      << (m_params.m_serverUrl.empty() ? "" : (" at endpoint " + m_params.m_serverUrl))
+                      << ": " << err.GetExceptionName() << " " << err.GetMessage() << std::endl;
+        }
+    }
+
+    BackupFolderInfo effective;
+
+    resolveImmutability(settings, effective);
+
+    m_params.m_immutabilitySupported = effective.m_immutabilitySupported;
+    m_params.m_immutabilityCurrent = effective.m_immutabilityCurrent;
+    m_params.m_immutabilityDays = effective.m_immutabilityDays;
+
+    std::string reason;
+
+    if (!honoursImmutabilityRequest(effective, request, reason)) {
+        std::cerr << "S3 bucket '" << bucket << "' " << reason << "." << std::endl;
+
+        // What can still be done about it depends on where it fell short: the
+        // switch itself is out of reach after the bucket was created, the rule
+        // written on top of it is not.
+        std::cerr << (effective.m_immutabilitySupported == ImmutabilityMode::NONE
+                          ? "Object Lock has to be enabled when the bucket is created."
+                          : "Adjust the default retention rule of the bucket.")
+                  << std::endl;
         return false;
     }
 

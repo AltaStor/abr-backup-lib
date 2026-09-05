@@ -13,6 +13,41 @@
 #include "s3_backup.h"
 #include "file_backup.h"
 
+namespace
+{
+    // Only the names of the enum are accepted, so that a typo is rejected
+    // instead of quietly passing for "no immutability at all".
+    bool ParseImmutabilityMode(const std::string &text, Abr::ImmutabilityMode &mode)
+    {
+        if (text == "none") {
+            mode = Abr::ImmutabilityMode::NONE;
+        } else if (text == "governance") {
+            mode = Abr::ImmutabilityMode::GOVERNANCE;
+        } else if (text == "compliance") {
+            mode = Abr::ImmutabilityMode::COMPLIANCE;
+        } else {
+            return false;
+        }
+
+        return true;
+    }
+
+    // A retention period, counted in days like everywhere else in the library.
+    bool ParseRetention(const std::string &text, int &days)
+    {
+        if (text.empty() || text.find_first_not_of("0123456789") != std::string::npos) {
+            return false;
+        }
+
+        try {
+            days = std::stoi(text);
+        } catch (const std::exception &) {
+            return false;
+        }
+
+        return days > 0;
+    }
+}
 
 int ListBackups(std::shared_ptr<Abr::IBackupManager> manager, const char *path)
 {
@@ -231,6 +266,32 @@ int TestEncryption(std::shared_ptr<Abr::IBackupManager> manager, const char *pat
     return succeeded ? 0 : 1;
 }
 
+//
+// Reports what the storage really does with the backups it is given: whether it
+// can hold them immutably at all, and in which mode and for how long new ones
+// would be retained. Combined with --immutable/--retention it also covers the
+// other half of the check, since a request the target cannot honour makes the
+// manager fail to initialize before this ever runs.
+//
+int TestImmutability(std::shared_ptr<Abr::IBackupManager> manager, const char *path)
+{
+    Abr::BackupFolderInfo info;
+
+    manager->getFolderInfo(path, info);
+
+    std::cout << "Immutability of '" << manager->getFolder() << "/" << path << "':\n"
+              << "  supported: " << Abr::immutabilityModeName(info.m_immutabilitySupported) << "\n"
+              << "  current:   " << Abr::immutabilityModeName(info.m_immutabilityCurrent) << "\n";
+
+    if (info.m_immutabilityCurrent == Abr::ImmutabilityMode::NONE) {
+        std::cout << "  retention: none, new backups stay deletable\n";
+    } else {
+        std::cout << "  retention: " << info.m_immutabilityDays << " day(s)\n";
+    }
+
+    return 0;
+}
+
 int PrintUsage()
 {
     std::cout << R"(
@@ -239,15 +300,23 @@ Usage:
       Options:
         -f, --file     Use a local folder instead of an S3 bucket
         -c, --create   Create the folder/bucket when it is missing
+        -i, --immutable <mode>
+                       Require none, governance or compliance immutability (S3 only)
+        -r, --retention <days>
+                       Require a retention period of at least <days> days, needs -i
       Commands and parameters:
         list [<path>]
         backup <path> <name>
         restore <path> <name>
         remove <path> <name>
         crypto <path> <name>
+        immutable [<path>]
 Where:
     bucket/dir - The name of the bucket/folder that contains the objects.
     path - The path within the folder to list objects.
+    mode - none, governance or compliance. The bucket has to apply at least
+           the requested mode to new backups, otherwise btest stops here.
+    days - the number of days new backups have to be retained for.
 )" << std::endl;
 
     return 1;
@@ -262,6 +331,8 @@ int main(int argc, char* argv[])
 
     bool bFile = false;
     bool bCreateFolder = false;
+    Abr::ImmutabilityMode immutability = Abr::ImmutabilityMode::NONE;
+    int immutabilityDays = 0;
 
     while (argc > 1 && argv[1][0] == '-') {
         std::string arg = argv[1];
@@ -269,12 +340,34 @@ int main(int argc, char* argv[])
             bFile = true;
         } else if (arg == "-c" || arg == "--create") {
             bCreateFolder = true;
+        } else if (arg == "-i" || arg == "--immutable") {
+            if (argc < 3 || !ParseImmutabilityMode(argv[2], immutability)) {
+                std::cerr << "Expected none, governance or compliance after " << arg << std::endl;
+                return 1;
+            }
+            argc--;
+            argv++;
+        } else if (arg == "-r" || arg == "--retention") {
+            if (argc < 3 || !ParseRetention(argv[2], immutabilityDays)) {
+                std::cerr << "Expected a retention period in days after " << arg << std::endl;
+                return 1;
+            }
+            argc--;
+            argv++;
         } else {
             std::cerr << "Unknown option: " << arg << std::endl;
             return 1;
         }
         argc--;
         argv++;
+    }
+
+    // A retention period on its own is not a request the manager looks at: the
+    // check starts from the mode, so asking for one without the other would
+    // silently do nothing.
+    if (immutabilityDays > 0 && immutability == Abr::ImmutabilityMode::NONE) {
+        std::cerr << "--retention has no effect without --immutable" << std::endl;
+        return 1;
     }
 
     if (argc < 3) {
@@ -286,6 +379,13 @@ int main(int argc, char* argv[])
     // The S3 manager reads its parameters back as S3BackupManagerParams, so the
     // mode decides which of the two structures has to be filled in.
     if (bFile) {
+        // A local folder has no Object Lock to ask about, so a request for one
+        // is a mistake worth pointing out rather than an option to drop.
+        if (immutability != Abr::ImmutabilityMode::NONE) {
+            std::cerr << "--immutable applies to S3 buckets only" << std::endl;
+            return 1;
+        }
+
         Abr::BackupManagerParams params;
         params.m_size = sizeof(params);
         params.m_createFolderIfMissing = bCreateFolder;
@@ -298,6 +398,11 @@ int main(int argc, char* argv[])
         params.m_createFolderIfMissing = bCreateFolder;
         params.m_folder = argv[1];
         params.m_pathStyle = true; // Use path-style addressing for S3 buckets
+
+        // Checked while the manager initializes: it probes the bucket and gives
+        // up when what is asked for here is more than the bucket applies.
+        params.m_immutabilityCurrent = immutability;
+        params.m_immutabilityDays = immutabilityDays;
 
         if (std::getenv("AWS_PROFILE")) {
             params.m_profile = std::getenv("AWS_PROFILE");
@@ -342,6 +447,9 @@ int main(int argc, char* argv[])
             return PrintUsage();
         }
         return TestEncryption(backupManager, argv[3], argv[4]);
+    }
+    if (cmd == "immutable") {
+        return TestImmutability(backupManager, argc > 3 ? argv[3] : "");
     }
 
     return PrintUsage();

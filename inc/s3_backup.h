@@ -32,6 +32,39 @@ namespace Abr
         AwsSdkGuard &operator=(const AwsSdkGuard &) = delete;
     };
 
+    //
+    // The Object Lock settings a probe found on a bucket. Reading them needs a
+    // live bucket, but deciding what they mean does not, which is why the two
+    // static members of S3BackupManager that judge them take them as data.
+    //
+    struct ObjectLockSettings
+    {
+        // Object Lock is switched on. On S3 that can only be done when the
+        // bucket is created, so one without it stays mutable for good.
+        bool m_enabled = false;
+
+        // The default retention rule, which is what objects written without
+        // retention headers of their own end up with. A rule may state its
+        // period in calendar years; it is converted to days when probed, so
+        // that one period can always be compared with another.
+        ImmutabilityMode m_defaultMode = ImmutabilityMode::NONE;
+
+        int m_days = 0;
+    };
+
+    //
+    // The immutability a caller asked for.
+    //
+    struct ImmutabilityRequest
+    {
+        ImmutabilityMode m_mode = ImmutabilityMode::NONE;
+
+        int m_days = 0;
+    };
+
+    // The name of a mode as the tools spell it: none, governance or compliance.
+    const char *immutabilityModeName(ImmutabilityMode mode);
+
     struct S3BackupManagerParams : BackupManagerParams
     {
         std::string     m_serverUrl;
@@ -39,6 +72,9 @@ namespace Abr
         std::string     m_accessKey;
         std::string     m_secretKey;
         std::string     m_profile;
+        ImmutabilityMode m_immutabilitySupported = ImmutabilityMode::NONE;
+        ImmutabilityMode m_immutabilityCurrent = ImmutabilityMode::NONE;
+        int     m_immutabilityDays = 0; // retention period new backups are held for, in days
         bool    m_pathStyle = false;
         bool    m_verifyTls = true;
     };
@@ -71,6 +107,22 @@ namespace Abr
 
         bool deleteBackup(const std::string &path, const std::string &name) override;
 
+        void getFolderInfo(const std::string &path, BackupFolderInfo &info) override;
+
+        // Turns the settings a probe found into the immutability that is actually
+        // in effect for new backups. Static because it only reads its arguments:
+        // checkImmutability() supplies them from a live bucket, a test states them
+        // outright.
+        static void resolveImmutability(const ObjectLockSettings &settings, BackupFolderInfo &effective);
+
+        // Answers whether a bucket with these settings hands new backups at least
+        // the mode and the period that were asked for. On a refusal `reason` is
+        // left holding what falls short, as a phrase to report after the bucket
+        // name.
+        static bool honoursImmutabilityRequest(const BackupFolderInfo &effective,
+                                               const ImmutabilityRequest &request,
+                                               std::string &reason);
+
         bool isExistingFile(const std::string &path) const;
 
         Aws::S3::S3Client *getS3Client() {
@@ -82,6 +134,13 @@ namespace Abr
         // was requested. Returns false (with a diagnostic on std::cerr) when the
         // bucket is absent and cannot be provisioned.
         bool ensureBucket(const std::string &bucket);
+
+        // Probes the Object Lock configuration of the bucket and records in
+        // m_params the mode and the retention period in days the target applies,
+        // so getFolderInfo() reports the storage's own settings rather than what
+        // the caller guessed. Returns false when an immutability mode or a
+        // retention period was requested that the bucket does not deliver.
+        bool checkImmutability(const std::string &bucket);
 
         // Aborts every multipart upload still pending for the given key, so that
         // the parts a run interrupted mid upload left behind are released.
