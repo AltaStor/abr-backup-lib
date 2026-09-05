@@ -213,6 +213,95 @@ namespace
                                                          requestOf(Abr::ImmutabilityMode::COMPLIANCE, 0), reason));
     }
 
+    // ---- what one backup is written with ----------------------------------
+
+    Abr::BackupInfo backupAsking(Abr::ImmutabilityMode mode, int days)
+    {
+        Abr::BackupInfo info = {};
+
+        info.m_immutabilityMode = mode;
+        info.m_immutabilityDays = days;
+
+        return info;
+    }
+
+    TEST(ResolveBackupRetention, WritesNoRetentionWhenNoneWasAskedFor)
+    {
+        // Without a retention of its own the backup is left to the bucket's
+        // default rule, whatever that rule happens to be.
+        const auto effective = resolved(lockedWith(Abr::ImmutabilityMode::COMPLIANCE, 30));
+        Abr::ObjectLockRetention retention;
+        std::string reason;
+
+        EXPECT_TRUE(Manager::resolveBackupRetention(effective, backupAsking(Abr::ImmutabilityMode::NONE, 0),
+                                                    retention, reason));
+        EXPECT_EQ(retention.m_mode, Abr::ImmutabilityMode::NONE);
+        EXPECT_TRUE(reason.empty());
+    }
+
+    TEST(ResolveBackupRetention, RefusesAModeTheBucketCannotHold)
+    {
+        // Object Lock off: no object of the bucket can be retained in any mode.
+        const auto effective = resolved(Abr::ObjectLockSettings());
+        Abr::ObjectLockRetention retention;
+        std::string reason;
+
+        EXPECT_FALSE(Manager::resolveBackupRetention(effective,
+                                                     backupAsking(Abr::ImmutabilityMode::GOVERNANCE, 30),
+                                                     retention, reason));
+        EXPECT_EQ(reason, "does not support governance immutability");
+        EXPECT_EQ(retention.m_mode, Abr::ImmutabilityMode::NONE);
+    }
+
+    TEST(ResolveBackupRetention, RefusesAModeWithoutAPeriod)
+    {
+        // The bucket can hold it, but the backup never said for how long, and a
+        // mode on its own retains nothing.
+        const auto effective = resolved(lockedWith(Abr::ImmutabilityMode::GOVERNANCE, 30));
+        Abr::ObjectLockRetention retention;
+        std::string reason;
+
+        EXPECT_FALSE(Manager::resolveBackupRetention(effective,
+                                                     backupAsking(Abr::ImmutabilityMode::COMPLIANCE, 0),
+                                                     retention, reason));
+        EXPECT_EQ(reason, "cannot hold a backup in compliance mode for 0 day(s)");
+    }
+
+    TEST(ResolveBackupRetention, HoldsTheBackupForTheRequestedPeriod)
+    {
+        const auto effective = resolved(lockedWith(Abr::ImmutabilityMode::GOVERNANCE, 7));
+        Abr::ObjectLockRetention retention;
+        std::string reason;
+
+        EXPECT_TRUE(Manager::resolveBackupRetention(effective,
+                                                    backupAsking(Abr::ImmutabilityMode::GOVERNANCE, 30),
+                                                    retention, reason));
+        EXPECT_EQ(retention.m_mode, Abr::ImmutabilityMode::GOVERNANCE);
+        EXPECT_TRUE(reason.empty());
+
+        // A retention put on an object is the backup's own, so it may outlast
+        // the seven days the bucket's default rule would have given it. The
+        // date is only checked to the day, since it is taken from the clock.
+        const int64_t millis = retention.m_retainUntil.Millis() - Aws::Utils::DateTime::Now().Millis();
+
+        EXPECT_GT(millis, static_cast<int64_t>(29) * 24 * 60 * 60 * 1000);
+        EXPECT_LE(millis, static_cast<int64_t>(30) * 24 * 60 * 60 * 1000);
+    }
+
+    TEST(ResolveBackupRetention, AsksForComplianceOnAGovernanceBucket)
+    {
+        // Object Lock is a bucket wide switch: once it is on, an object may be
+        // written in either mode, whichever one the default rule names.
+        const auto effective = resolved(lockedWith(Abr::ImmutabilityMode::GOVERNANCE, 30));
+        Abr::ObjectLockRetention retention;
+        std::string reason;
+
+        EXPECT_TRUE(Manager::resolveBackupRetention(effective,
+                                                    backupAsking(Abr::ImmutabilityMode::COMPLIANCE, 30),
+                                                    retention, reason));
+        EXPECT_EQ(retention.m_mode, Abr::ImmutabilityMode::COMPLIANCE);
+    }
+
     // ---- how the settings are spelled out --------------------------------
 
     TEST(ImmutabilityNames, SpellsOutTheModes)

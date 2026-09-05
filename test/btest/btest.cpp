@@ -72,7 +72,8 @@ int ListBackups(std::shared_ptr<Abr::IBackupManager> manager, const char *path)
     return 0;
 }
 
-int TestBackup(std::shared_ptr<Abr::IBackupManager> manager, const char *path, const char *name)
+int TestBackup(std::shared_ptr<Abr::IBackupManager> manager, const char *path, const char *name,
+    Abr::ImmutabilityMode immutability, int immutabilityDays)
 {
     Abr::BackupInfo info = {};
     std::shared_ptr<Abr::IBackup> pBackup;
@@ -80,6 +81,11 @@ int TestBackup(std::shared_ptr<Abr::IBackupManager> manager, const char *path, c
     info.sectorSize = 512;
     info.phySectorSize = 512;
     info.sectors = 0x10000000;
+
+    // What -i/-r ask for is written on the objects of this backup, on top of
+    // whatever default rule the bucket applies to everything it holds.
+    info.m_immutabilityMode = immutability;
+    info.m_immutabilityDays = immutabilityDays;
 
     if (!manager->createBackup(path, name, info, pBackup)) {
         std::cerr << "Failed to create backup!\n";
@@ -301,7 +307,8 @@ Usage:
         -f, --file     Use a local folder instead of an S3 bucket
         -c, --create   Create the folder/bucket when it is missing
         -i, --immutable <mode>
-                       Require none, governance or compliance immutability (S3 only)
+                       Require none, governance or compliance immutability (S3 only),
+                       and hold the backups written by this run in that mode
         -r, --retention <days>
                        Require a retention period of at least <days> days, needs -i
       Commands and parameters:
@@ -428,7 +435,7 @@ int main(int argc, char* argv[])
         if (argc < 5) {
             return PrintUsage();
         }
-        return TestBackup(backupManager, argv[3], argv[4]);
+        return TestBackup(backupManager, argv[3], argv[4], immutability, immutabilityDays);
     }
     if (cmd == "restore") {
         if (argc < 5) {

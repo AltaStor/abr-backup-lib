@@ -8,6 +8,7 @@
 #include "abr_backup_format.h"
 #include "backup_core.h"
 
+#include <chrono>
 #include <iostream>
 
 #include <aws/core/auth/AWSCredentialsProviderChain.h>
@@ -37,8 +38,9 @@ namespace Abr
     class S3Backup : public Abr::BackupCore
     {
     public:
-        S3Backup(std::shared_ptr<Abr::IBackupManager> pManager)
+        S3Backup(std::shared_ptr<Abr::IBackupManager> pManager, const ObjectLockRetention &retention)
             : Abr::BackupCore(pManager)
+            , m_retention(retention)
         {
             m_minWriteSize = 0x500000; // 5 MB
             m_maxWriteSize = 0x800000; // 8 MB
@@ -60,6 +62,12 @@ namespace Abr
         bool closeFile(Handle hFile, bool bDelete = false) override;
 
         bool deleteFile(const std::string &fullName) override;
+
+    private:
+        // The Object Lock retention every object of this backup is written
+        // with, as S3BackupManager::createBackup() resolved it. Empty when the
+        // backup asked for no immutability of its own.
+        ObjectLockRetention m_retention;
     };
 
     //
@@ -288,10 +296,8 @@ bool Abr::S3BackupManager::honoursImmutabilityRequest(const BackupFolderInfo &ef
         return false;
     }
 
-    // Immutability being available is not enough. Since backups carry no
-    // retention of their own, the default retention rule has to hand them at
-    // least the mode and the period that were asked for.
-    if (effective.m_immutabilityCurrent < request.m_mode) {
+    // Immutability being available is too high.
+    if (effective.m_immutabilityCurrent > request.m_mode) {
         reason = effective.m_immutabilityCurrent == ImmutabilityMode::NONE
             ? std::string("applies no immutability to new backups")
             : std::string("applies ") + immutabilityModeName(effective.m_immutabilityCurrent)
@@ -301,11 +307,47 @@ bool Abr::S3BackupManager::honoursImmutabilityRequest(const BackupFolderInfo &ef
         return false;
     }
 
-    if (effective.m_immutabilityDays < request.m_days) {
+    if (effective.m_immutabilityDays > request.m_days) {
         reason = "retains new backups for " + retentionPeriodName(effective.m_immutabilityDays)
-            + ", less than the requested " + retentionPeriodName(request.m_days);
+            + ", longer than the requested " + retentionPeriodName(request.m_days);
         return false;
     }
+
+    return true;
+}
+
+//
+// What one backup asked for, turned into the retention its objects carry.
+//
+bool Abr::S3BackupManager::resolveBackupRetention(const BackupFolderInfo &effective, const BackupInfo &info,
+                                                  ObjectLockRetention &retention, std::string &reason)
+{
+    retention = ObjectLockRetention();
+    reason.clear();
+
+    if (info.m_immutabilityMode == ImmutabilityMode::NONE) {
+        // The backup asked for nothing, so its objects are written without
+        // retention of their own and fall to the bucket's default rule.
+        return true;
+    }
+
+    if (effective.m_immutabilitySupported < info.m_immutabilityMode) {
+        reason = std::string("does not support ") + immutabilityModeName(info.m_immutabilityMode)
+            + " immutability";
+        return false;
+    }
+
+    // A mode without a period retains nothing, so a backup that names the one
+    // without the other has not said how long it wants to be kept.
+    if (info.m_immutabilityDays <= 0) {
+        reason = std::string("cannot hold a backup in ") + immutabilityModeName(info.m_immutabilityMode)
+            + " mode for " + retentionPeriodName(info.m_immutabilityDays);
+        return false;
+    }
+
+    retention.m_mode = info.m_immutabilityMode;
+    retention.m_retainUntil = Aws::Utils::DateTime::Now()
+        + std::chrono::milliseconds(static_cast<int64_t>(info.m_immutabilityDays) * 24 * 60 * 60 * 1000);
 
     return true;
 }
@@ -512,8 +554,23 @@ bool Abr::S3BackupManager::listBackups(const std::string &path, std::vector<std:
 bool Abr::S3BackupManager::createBackup(const std::string &path, const std::string &name,
     const BackupInfo& info, std::shared_ptr<IBackup> &pBackup, const std::string encryptionKey)
 {
+    // What the bucket was found to offer when the manager was initialized, so
+    // that a backup asking for more than it can hold is refused before a single
+    // object of it is uploaded.
+    BackupFolderInfo effective;
+
+    getFolderInfo(path, effective);
+
+    ObjectLockRetention retention;
+    std::string reason;
+
+    if (!resolveBackupRetention(effective, info, retention, reason)) {
+        std::cerr << "S3 bucket '" << getFolder() << "' " << reason << "." << std::endl;
+        return false;
+    }
+
     std::shared_ptr<S3BackupManager> self = shared_from_this();
-    auto backup = std::make_shared<S3Backup>(self);
+    auto backup = std::make_shared<S3Backup>(self, retention);
 
     if (!backup->create(path, name, info, encryptionKey)) {
         std::cerr << "Failed to create backup " << name << " in " << path << std::endl;
@@ -703,6 +760,7 @@ Handle Abr::S3Backup::createFile(const std::string &fullName, bool partialWrite)
         Aws::S3::Model::CreateMultipartUploadRequest request;
         request.SetBucket(m_pManager->getFolder());
         request.SetKey(pFile->m_filename);
+        S3BackupManager::applyRetention(m_retention, request);
 
         auto outcome = pClient->CreateMultipartUpload(request);
 
@@ -753,6 +811,7 @@ bool Abr::S3Backup::writeFile(Handle hFile, void *pDataBuf, uint32_t dataLength)
         request.SetBucket(m_pManager->getFolder());
         request.SetKey(pFile->m_filename);
         request.SetBody(data);
+        S3BackupManager::applyRetention(m_retention, request);
 
         auto outcome = pClient->PutObject(request);
 
@@ -840,6 +899,7 @@ bool Abr::S3Backup::closeFile(Handle hFile, bool bDelete)
         request.SetKey(pFile->m_filename);
         request.SetBody(Aws::MakeShared<Aws::StringStream>("PutObjectEmptyBuffer",
                 std::stringstream::in | std::stringstream::out | std::stringstream::binary));
+        S3BackupManager::applyRetention(m_retention, request);
 
         auto outcome = pClient->PutObject(request);
 

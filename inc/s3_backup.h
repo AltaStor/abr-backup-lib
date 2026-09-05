@@ -8,7 +8,9 @@
 #include "abr_backup.h"
 
 #include <aws/core/Aws.h>
+#include <aws/core/utils/DateTime.h>
 #include <aws/s3/S3Client.h>
+#include <aws/s3/model/ObjectLockMode.h>
 
 namespace Abr
 {
@@ -62,6 +64,21 @@ namespace Abr
         int m_days = 0;
     };
 
+    //
+    // The Object Lock retention written on the objects one backup is made of.
+    // A backup that asked for no immutability carries none of its own and gets
+    // whatever the bucket's default rule hands it.
+    //
+    struct ObjectLockRetention
+    {
+        ImmutabilityMode m_mode = ImmutabilityMode::NONE;
+
+        // The moment the objects stop being retained. Fixed once, when the
+        // backup is created, so that a long upload does not hand its last
+        // object a later date than its first.
+        Aws::Utils::DateTime m_retainUntil;
+    };
+
     // The name of a mode as the tools spell it: none, governance or compliance.
     const char *immutabilityModeName(ImmutabilityMode mode);
 
@@ -109,6 +126,12 @@ namespace Abr
 
         void getFolderInfo(const std::string &path, BackupFolderInfo &info) override;
 
+        bool isExistingFile(const std::string &path) const;
+
+        Aws::S3::S3Client *getS3Client() {
+            return m_s3_client;
+        }
+
         // Turns the settings a probe found into the immutability that is actually
         // in effect for new backups. Static because it only reads its arguments:
         // checkImmutability() supplies them from a live bucket, a test states them
@@ -123,10 +146,28 @@ namespace Abr
                                                const ImmutabilityRequest &request,
                                                std::string &reason);
 
-        bool isExistingFile(const std::string &path) const;
+        // Turns the immutability a backup asks for into the retention its objects
+        // are written with. Unlike the bucket's default rule, a retention put on
+        // an object is the backup's own to choose, so only the mode has to be
+        // within what the bucket supports: the period does not have to fit the
+        // default one. On a refusal `reason` is left holding what falls short,
+        // as a phrase to report after the bucket name.
+        static bool resolveBackupRetention(const BackupFolderInfo &effective, const BackupInfo &info,
+                                           ObjectLockRetention &retention, std::string &reason);
 
-        Aws::S3::S3Client *getS3Client() {
-            return m_s3_client;
+        // Stamps a retention onto an upload request. PutObject and
+        // CreateMultipartUpload take it the same way, which is what the template
+        // is for; an uploaded part carries no retention of its own, the upload
+        // it belongs to does.
+        template<typename RequestT>
+        static void applyRetention(const ObjectLockRetention &retention, RequestT &request)
+        {
+            if (retention.m_mode != ImmutabilityMode::NONE) {
+                request.SetObjectLockMode(retention.m_mode == ImmutabilityMode::COMPLIANCE
+                        ? Aws::S3::Model::ObjectLockMode::COMPLIANCE
+                        : Aws::S3::Model::ObjectLockMode::GOVERNANCE);
+                request.SetObjectLockRetainUntilDate(retention.m_retainUntil);
+            }
         }
 
     private:
