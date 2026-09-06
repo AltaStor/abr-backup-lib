@@ -133,11 +133,8 @@ namespace Abr
 
         virtual bool deleteBackup(const std::string &path, const std::string &name) = 0;
 
-        virtual void getFolderInfo(const std::string &path, BackupFolderInfo &info) {
-            // default implementation assumes no immutability support
-            info.m_immutabilitySupported = ImmutabilityMode::NONE;
-            info.m_immutabilityCurrent = ImmutabilityMode::NONE;
-            info.m_immutabilityDays = 0;
+        const BackupFolderInfo& getFolderInfo() const {
+            return m_folderInfo;
         };
          
         const std::string& getFolder() const {
@@ -146,6 +143,8 @@ namespace Abr
 
     protected:
         std::string m_folder;
+
+        BackupFolderInfo m_folderInfo;
     };
 
     //

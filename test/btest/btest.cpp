@@ -281,9 +281,7 @@ int TestEncryption(std::shared_ptr<Abr::IBackupManager> manager, const char *pat
 //
 int TestImmutability(std::shared_ptr<Abr::IBackupManager> manager, const char *path)
 {
-    Abr::BackupFolderInfo info;
-
-    manager->getFolderInfo(path, info);
+    auto info = manager->getFolderInfo();
 
     std::cout << "Immutability of '" << manager->getFolder() << "/" << path << "':\n"
               << "  supported: " << Abr::immutabilityModeName(info.m_immutabilitySupported) << "\n"
@@ -408,7 +406,7 @@ int main(int argc, char* argv[])
 
         // Checked while the manager initializes: it probes the bucket and gives
         // up when what is asked for here is more than the bucket applies.
-        params.m_immutabilityCurrent = immutability;
+        params.m_immutabilityMode = immutability;
         params.m_immutabilityDays = immutabilityDays;
 
         if (std::getenv("AWS_PROFILE")) {

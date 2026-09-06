@@ -193,22 +193,15 @@ bool Abr::S3BackupManager::initialize(const Abr::BackupManagerParams& params)
 
     m_folder = params.m_folder;
 
-    if (!ensureBucket(m_folder)) {
+    if (!ensureBucket()) {
         return false;
     }
 
-    if (!checkImmutability(m_folder)) {
+    if (!checkImmutability()) {
         return false;
     }
 
     return true;
-}
-
-void Abr::S3BackupManager::getFolderInfo(const std::string &path, BackupFolderInfo &info)
-{
-    info.m_immutabilitySupported = m_params.m_immutabilitySupported;
-    info.m_immutabilityCurrent = m_params.m_immutabilityCurrent;
-    info.m_immutabilityDays = m_params.m_immutabilityDays;
 }
 
 namespace
@@ -356,19 +349,18 @@ bool Abr::S3BackupManager::resolveBackupRetention(const BackupFolderInfo &effect
 // Find out whether the bucket can hold immutable backups at all, and in which
 // mode and for how long new backups would be retained.
 //
-bool Abr::S3BackupManager::checkImmutability(const std::string &bucket)
+bool Abr::S3BackupManager::checkImmutability()
 {
     // What the caller asked for. The probe below replaces the fields with what
     // the bucket really applies, so the request is kept aside for validation.
+    ObjectLockSettings settings;
     ImmutabilityRequest request;
 
-    request.m_mode = m_params.m_immutabilityCurrent;
+    request.m_mode = m_params.m_immutabilityMode;
     request.m_days = m_params.m_immutabilityDays;
 
-    ObjectLockSettings settings;
-
     Aws::S3::Model::GetObjectLockConfigurationRequest lockRequest;
-    lockRequest.SetBucket(bucket);
+    lockRequest.SetBucket(m_folder);
 
     auto outcome = m_s3_client->GetObjectLockConfiguration(lockRequest);
 
@@ -387,34 +379,29 @@ bool Abr::S3BackupManager::checkImmutability(const std::string &bucket)
     } else {
         // Object Lock is optional: a bucket created without it answers
         // ObjectLockConfigurationNotFoundError, and S3 compatible targets that
-        // do not implement the API at all answer NotImplemented or
-        // MethodNotAllowed. Neither is a reason to fail a backup that does not
-        // need immutability, so it is only reported when one was requested.
+        // do not implement the API at all answer NotImplemented or MethodNotAllowed.
+        // Neither is a reason to fail a backup that does not need immutability,
+        // so it is only reported when one was requested.
         if (request.m_mode != ImmutabilityMode::NONE) {
             const auto &err = outcome.GetError();
-            std::cerr << "Failed to read the Object Lock configuration of S3 bucket '" << bucket << "'"
+            std::cerr << "Failed to read the Object Lock configuration of S3 bucket '" << m_folder << "'"
                       << (m_params.m_serverUrl.empty() ? "" : (" at endpoint " + m_params.m_serverUrl))
                       << ": " << err.GetExceptionName() << " " << err.GetMessage() << std::endl;
+            return false;
         }
     }
 
-    BackupFolderInfo effective;
-
-    resolveImmutability(settings, effective);
-
-    m_params.m_immutabilitySupported = effective.m_immutabilitySupported;
-    m_params.m_immutabilityCurrent = effective.m_immutabilityCurrent;
-    m_params.m_immutabilityDays = effective.m_immutabilityDays;
-
     std::string reason;
 
-    if (!honoursImmutabilityRequest(effective, request, reason)) {
-        std::cerr << "S3 bucket '" << bucket << "' " << reason << "." << std::endl;
+    resolveImmutability(settings, m_folderInfo);
+
+    if (!honoursImmutabilityRequest(m_folderInfo, request, reason)) {
+        std::cerr << "S3 bucket '" << m_folder << "' " << reason << "." << std::endl;
 
         // What can still be done about it depends on where it fell short: the
         // switch itself is out of reach after the bucket was created, the rule
         // written on top of it is not.
-        std::cerr << (effective.m_immutabilitySupported == ImmutabilityMode::NONE
+        std::cerr << (m_folderInfo.m_immutabilitySupported == ImmutabilityMode::NONE
                           ? "Object Lock has to be enabled when the bucket is created."
                           : "Adjust the default retention rule of the bucket.")
                   << std::endl;
@@ -427,10 +414,10 @@ bool Abr::S3BackupManager::checkImmutability(const std::string &bucket)
 //
 // Make sure the target bucket exists before any object operation is attempted.
 //
-bool Abr::S3BackupManager::ensureBucket(const std::string &bucket)
+bool Abr::S3BackupManager::ensureBucket()
 {
     Aws::S3::Model::HeadBucketRequest headRequest;
-    headRequest.SetBucket(bucket);
+    headRequest.SetBucket(m_folder);
 
     auto headOutcome = m_s3_client->HeadBucket(headRequest);
     if (headOutcome.IsSuccess()) {
@@ -438,7 +425,7 @@ bool Abr::S3BackupManager::ensureBucket(const std::string &bucket)
     }
 
     if (!m_params.m_createFolderIfMissing) {
-        std::cerr << "S3 bucket '" << bucket << "' is not accessible"
+        std::cerr << "S3 bucket '" << m_folder << "' is not accessible"
                   << (m_params.m_serverUrl.empty() ? "" : (" at endpoint " + m_params.m_serverUrl))
                   << ": " << headOutcome.GetError().GetMessage()
                   << ". Create the bucket or enable bucket auto-creation." << std::endl;
@@ -446,7 +433,7 @@ bool Abr::S3BackupManager::ensureBucket(const std::string &bucket)
     }
 
     Aws::S3::Model::CreateBucketRequest createRequest;
-    createRequest.SetBucket(bucket);
+    createRequest.SetBucket(m_folder);
 
     // Real AWS S3 requires a location constraint for every region other than
     // us-east-1. S3-compatible targets (Garage/MinIO/Ceph) reached through a
@@ -460,7 +447,7 @@ bool Abr::S3BackupManager::ensureBucket(const std::string &bucket)
 
     auto createOutcome = m_s3_client->CreateBucket(createRequest);
     if (createOutcome.IsSuccess()) {
-        std::cerr << "S3 bucket '" << bucket << "' did not exist; created it." << std::endl;
+        std::cerr << "S3 bucket '" << m_folder << "' did not exist; created it." << std::endl;
         return true;
     }
 
@@ -471,7 +458,7 @@ bool Abr::S3BackupManager::ensureBucket(const std::string &bucket)
         return true;
     }
 
-    std::cerr << "Failed to create S3 bucket '" << bucket << "'"
+    std::cerr << "Failed to create S3 bucket '" << m_folder << "'"
               << (m_params.m_serverUrl.empty() ? "" : (" at endpoint " + m_params.m_serverUrl))
               << ": " << err.GetMessage() << std::endl;
     return false;
@@ -484,12 +471,11 @@ bool Abr::S3BackupManager::isExistingFile(const std::string &path) const
         return false;
     }
 
-    Aws::S3::Model::GetObjectRequest request;
+    Aws::S3::Model::HeadObjectRequest request;
     request.SetBucket(getFolder());
     request.SetKey(path);
-    request.SetRange("bytes=0-0"); // Request the first byte to check if the object exists
-
-    Aws::S3::Model::GetObjectOutcome outcome = m_s3_client->GetObject(request);
+    
+    Aws::S3::Model::HeadObjectOutcome outcome = m_s3_client->HeadObject(request);
 
     return outcome.IsSuccess();
 }
@@ -554,17 +540,10 @@ bool Abr::S3BackupManager::listBackups(const std::string &path, std::vector<std:
 bool Abr::S3BackupManager::createBackup(const std::string &path, const std::string &name,
     const BackupInfo& info, std::shared_ptr<IBackup> &pBackup, const std::string encryptionKey)
 {
-    // What the bucket was found to offer when the manager was initialized, so
-    // that a backup asking for more than it can hold is refused before a single
-    // object of it is uploaded.
-    BackupFolderInfo effective;
-
-    getFolderInfo(path, effective);
-
     ObjectLockRetention retention;
     std::string reason;
 
-    if (!resolveBackupRetention(effective, info, retention, reason)) {
+    if (!resolveBackupRetention(getFolderInfo(), info, retention, reason)) {
         std::cerr << "S3 bucket '" << getFolder() << "' " << reason << "." << std::endl;
         return false;
     }
@@ -641,32 +620,58 @@ bool Abr::S3BackupManager::saveMetaData(const std::string &path, const std::stri
     return true;
 }
 
-bool Abr::S3BackupManager::deleteBackup(const std::string &path, const std::string &name)
+bool Abr::S3BackupManager::deleteFile(const std::string &path)
 {
-    auto deleteKey = [&](const std::string &key) -> bool {
-        Aws::S3::Model::DeleteObjectRequest request;
-        request.WithBucket(m_folder);
-        request.WithKey(key);
+    Aws::String versionId;
+    Aws::S3::Model::HeadObjectRequest request;
+    request.SetBucket(m_folder);
+    request.SetKey(path);
+    
+    auto outcome = m_s3_client->HeadObject(request);
 
-        auto outcome = m_s3_client->DeleteObject(request);
-        if (outcome.IsSuccess()) {
-            return true;
-        }
-
+    if (outcome.IsSuccess()) {
+        // Object exists, get its version id if versioning is enabled
+        versionId = outcome.GetResult().GetVersionId();
+    } else {
         auto err = outcome.GetError();
         if (err.GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND) {
+            // Object does not exist, consider it deleted
             return true;
+        } else {
+            std::cerr << "Error: headObject: " << err.GetExceptionName() << ": " << err.GetMessage() << std::endl;
+            return false;
         }
+    }
 
-        std::cerr << "Error: deleteObject: " << err.GetExceptionName() << ": " << err.GetMessage() << std::endl;
-        return false;
-    };
+    Aws::S3::Model::DeleteObjectRequest drequest;
+    drequest.WithBucket(m_folder);
+    drequest.WithKey(path);
+    if (!versionId.empty()) {
+        drequest.SetVersionId(versionId);
+    }
+
+    auto doutcome = m_s3_client->DeleteObject(drequest);
+    if (doutcome.IsSuccess()) {
+        return true;
+    }
+
+    auto err = doutcome.GetError();
+    if (err.GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND) {
+        return true;
+    }
+
+    std::cerr << "Error: deleteObject: " << err.GetExceptionName() << ": " << err.GetMessage() << std::endl;
+    return false;
+}
+
+bool Abr::S3BackupManager::deleteBackup(const std::string &path, const std::string &name)
+{
 
     std::string baseName = join_backup_path(path, name);
 
-    bool dataDeleted = deleteKey(baseName + Abr::DATA_FILE_EXT);
-    bool indexDeleted = deleteKey(baseName + Abr::INDEX_FILE_EXT);
-    bool metaDataDeleted = deleteKey(baseName + Abr::META_FILE_EXT);
+    bool dataDeleted = deleteFile(baseName + Abr::DATA_FILE_EXT);
+    bool indexDeleted = deleteFile(baseName + Abr::INDEX_FILE_EXT);
+    bool metaDataDeleted = deleteFile(baseName + Abr::META_FILE_EXT);
 
     // A run that died mid upload leaves a multipart upload of the data object
     // pending. Its parts are stored and billed while the object itself does not
@@ -751,6 +756,12 @@ Handle Abr::S3Backup::createFile(const std::string &fullName, bool partialWrite)
     S3FileHandle *pFile = new S3FileHandle(fullName, partialWrite);
     if (!pFile) {
         std::cerr << "Failed to create file '" << fullName << "'!\n";
+        return nullptr;
+    }
+
+    if (static_cast<S3BackupManager*>(&*m_pManager)->isExistingFile(fullName)) {
+        std::cerr << "File '" << fullName << "' already exists!\n";
+        delete pFile;
         return nullptr;
     }
 
@@ -849,19 +860,10 @@ bool Abr::S3Backup::closeFile(Handle hFile, bool bDelete)
                 return false;
             }
         } else {
-            Aws::S3::Model::DeleteObjectRequest request;
-            request.WithBucket(m_pManager->getFolder());
-            request.WithKey(pFile->m_filename);
-
-            auto outcome = pClient->DeleteObject(request);
-
-            if (!outcome.IsSuccess()) {
-                auto err = outcome.GetError();
-                if (err.GetResponseCode() != Aws::Http::HttpResponseCode::NOT_FOUND) {
-                    std::cerr << "Error: deleteObject: " << err.GetExceptionName() << ": " << err.GetMessage() << std::endl;
-                    delete pFile;
-                    return false;
-                }
+            if (!static_cast<S3BackupManager*>(&*m_pManager)->deleteFile(pFile->m_filename)) {
+                std::cerr << "Error deleting file: " << pFile->m_filename << std::endl;
+                delete pFile;
+                return false;
             }
         }
 
@@ -948,25 +950,7 @@ bool Abr::S3Backup::closeFile(Handle hFile, bool bDelete)
 
 bool Abr::S3Backup::deleteFile(const std::string &fullName)
 {
-    auto pClient = static_cast<S3BackupManager*>(&*m_pManager)->getS3Client();
-
-    Aws::S3::Model::DeleteObjectRequest request;
-    request.WithBucket(m_pManager->getFolder());
-    request.WithKey(fullName);
-
-    auto outcome = pClient->DeleteObject(request);
-
-    if (!outcome.IsSuccess()) {
-        auto err = outcome.GetError();
-        if (err.GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND) {
-            return true;
-        }
-
-        std::cerr << "Error: deleteObject: " << err.GetExceptionName() << ": " << err.GetMessage() << std::endl;
-        return false;
-    }
-
-    return true;
+    return static_cast<S3BackupManager*>(&*m_pManager)->deleteFile(fullName);
 }
 
 Handle Abr::S3Restore::openFile(const std::string &fullName)
@@ -999,7 +983,7 @@ bool Abr::S3Restore::readFile(Handle hFile, void *pDataBuf, uint64_t offset, uin
     request.SetKey(pFile->m_filename);
     std::string range = "bytes=" + std::to_string(offset) + "-" + std::to_string(offset + dataLength - 1);
     request.SetRange(range);
-    
+
     request.SetResponseStreamFactory([&streambuf]() {
         return Aws::New<Aws::IOStream>("", &streambuf);
     });
@@ -1025,19 +1009,5 @@ bool Abr::S3Restore::closeFile(Handle hFile)
 
 bool Abr::S3Restore::deleteFile(const std::string &fullName)
 {
-    auto pClient = static_cast<S3BackupManager*>(&*m_pManager)->getS3Client();
-
-    Aws::S3::Model::DeleteObjectRequest request;
-    request.WithBucket(m_pManager->getFolder());
-    request.WithKey(fullName);
-
-    auto outcome = pClient->DeleteObject(request);
-
-    if (!outcome.IsSuccess()) {
-        auto err = outcome.GetError();
-        std::cerr << "Error: deleteObject: " << err.GetExceptionName() << ": " << err.GetMessage() << std::endl;
-        return false;
-    }
-
-    return true;
+    return static_cast<S3BackupManager*>(&*m_pManager)->deleteFile(fullName);
 }

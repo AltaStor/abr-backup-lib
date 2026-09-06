@@ -555,9 +555,7 @@ namespace
         // A local folder has no Object Lock to offer, and the manager inherits
         // the default answer. A caller reading this must not be left with the
         // impression that a backup put here cannot be deleted again.
-        Abr::BackupFolderInfo info;
-
-        manager->getFolderInfo(kPath, info);
+        auto info = manager->getFolderInfo();
 
         EXPECT_EQ(info.m_immutabilitySupported, Abr::ImmutabilityMode::NONE);
         EXPECT_EQ(info.m_immutabilityCurrent, Abr::ImmutabilityMode::NONE);

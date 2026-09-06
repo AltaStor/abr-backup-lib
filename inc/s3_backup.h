@@ -89,8 +89,7 @@ namespace Abr
         std::string     m_accessKey;
         std::string     m_secretKey;
         std::string     m_profile;
-        ImmutabilityMode m_immutabilitySupported = ImmutabilityMode::NONE;
-        ImmutabilityMode m_immutabilityCurrent = ImmutabilityMode::NONE;
+        ImmutabilityMode m_immutabilityMode = ImmutabilityMode::NONE;
         int     m_immutabilityDays = 0; // retention period new backups are held for, in days
         bool    m_pathStyle = false;
         bool    m_verifyTls = true;
@@ -124,9 +123,9 @@ namespace Abr
 
         bool deleteBackup(const std::string &path, const std::string &name) override;
 
-        void getFolderInfo(const std::string &path, BackupFolderInfo &info) override;
-
         bool isExistingFile(const std::string &path) const;
+
+        bool deleteFile(const std::string &path);
 
         Aws::S3::S3Client *getS3Client() {
             return m_s3_client;
@@ -174,14 +173,14 @@ namespace Abr
         // Verify the configured bucket exists; create it when createBucketIfMissing
         // was requested. Returns false (with a diagnostic on std::cerr) when the
         // bucket is absent and cannot be provisioned.
-        bool ensureBucket(const std::string &bucket);
+        bool ensureBucket();
 
         // Probes the Object Lock configuration of the bucket and records in
         // m_params the mode and the retention period in days the target applies,
         // so getFolderInfo() reports the storage's own settings rather than what
         // the caller guessed. Returns false when an immutability mode or a
         // retention period was requested that the bucket does not deliver.
-        bool checkImmutability(const std::string &bucket);
+        bool checkImmutability();
 
         // Aborts every multipart upload still pending for the given key, so that
         // the parts a run interrupted mid upload left behind are released.
