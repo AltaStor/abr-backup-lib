@@ -154,6 +154,14 @@ namespace Abr
         static bool resolveBackupRetention(const BackupFolderInfo &effective, const BackupInfo &info,
                                            ObjectLockRetention &retention, std::string &reason);
 
+        // The retention left on an object, counted in the days the tools report.
+        // Any part of a day still holds the object, so a remainder counts as a
+        // whole day; a date already past holds nothing. Static because it only
+        // reads its arguments: readBackupRetention() supplies them from a live
+        // object, a test states them outright.
+        static int retentionDaysLeft(const Aws::Utils::DateTime &retainUntil,
+                                     const Aws::Utils::DateTime &now);
+
         // Stamps a retention onto an upload request. PutObject and
         // CreateMultipartUpload take it the same way, which is what the template
         // is for; an uploaded part carries no retention of its own, the upload
@@ -185,6 +193,13 @@ namespace Abr
         // Aborts every multipart upload still pending for the given key, so that
         // the parts a run interrupted mid upload left behind are released.
         bool abortPendingUploads(const std::string &key);
+
+        // Reads back the Object Lock retention an object carries, as the mode it
+        // is held in and the days it has left. Returns false when the target has
+        // no retention to report -- an object written without one, or a target
+        // that does not implement Object Lock at all -- which leaves `mode` NONE
+        // and `days` 0, the same as an expired retention.
+        bool readBackupRetention(const std::string &key, ImmutabilityMode &mode, int &days);
 
         Aws::S3::S3Client *m_s3_client;
 

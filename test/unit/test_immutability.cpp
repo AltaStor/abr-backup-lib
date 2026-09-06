@@ -302,6 +302,41 @@ namespace
         EXPECT_EQ(retention.m_mode, Abr::ImmutabilityMode::COMPLIANCE);
     }
 
+    // ---- what is left of a retention -------------------------------------
+
+    // The retention read back off a stored backup is a date; what the tools
+    // report is the days left until it. The clock is stated outright here
+    // rather than taken from the machine, so that a period is exact.
+    Aws::Utils::DateTime at(int64_t millis)
+    {
+        return Aws::Utils::DateTime(millis);
+    }
+
+    const int64_t kDay = static_cast<int64_t>(24) * 60 * 60 * 1000;
+    const int64_t kNow = static_cast<int64_t>(1'700'000'000) * 1000;
+
+    TEST(RetentionDaysLeft, CountsWholeDaysToTheDate)
+    {
+        EXPECT_EQ(Manager::retentionDaysLeft(at(kNow + 30 * kDay), at(kNow)), 30);
+        EXPECT_EQ(Manager::retentionDaysLeft(at(kNow + kDay), at(kNow)), 1);
+    }
+
+    TEST(RetentionDaysLeft, CountsAPartOfADayAsAWholeOne)
+    {
+        // The object is held right up to the date, so the last part of a day is
+        // a day it is still retained for, not one it has lost.
+        EXPECT_EQ(Manager::retentionDaysLeft(at(kNow + 30 * kDay + 1), at(kNow)), 31);
+        EXPECT_EQ(Manager::retentionDaysLeft(at(kNow + 1), at(kNow)), 1);
+    }
+
+    TEST(RetentionDaysLeft, ReportsNothingOnceTheDateHasPassed)
+    {
+        // A retention that ran out holds nothing, and reads the same as an
+        // object that was never given one.
+        EXPECT_EQ(Manager::retentionDaysLeft(at(kNow), at(kNow)), 0);
+        EXPECT_EQ(Manager::retentionDaysLeft(at(kNow - kDay), at(kNow)), 0);
+    }
+
     // ---- how the settings are spelled out --------------------------------
 
     TEST(ImmutabilityNames, SpellsOutTheModes)

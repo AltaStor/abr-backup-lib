@@ -119,6 +119,15 @@ namespace Abr
             return m_info;
         }
 
+        // Records the immutability the storage found on the backup's own files.
+        // The index header keeps no retention of its own -- it is the storage
+        // that holds a backup immutable -- so the manager that opened the backup
+        // fills this in from what the storage reports.
+        void setImmutability(ImmutabilityMode mode, int days) {
+            m_info.m_immutabilityMode = mode;
+            m_info.m_immutabilityDays = days;
+        }
+
         bool getDataRanges(std::vector<Range> &ranges) override;
 
         bool loadDataRange(uint32_t rangeIndex, void *pDataBuf, uint32_t length, uint32_t offset) override;

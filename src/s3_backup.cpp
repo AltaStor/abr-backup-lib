@@ -24,6 +24,7 @@
 #include <aws/s3/model/BucketLocationConstraint.h>
 #include <aws/s3/model/GetObjectAttributesRequest.h>
 #include <aws/s3/model/GetObjectLockConfigurationRequest.h>
+#include <aws/s3/model/GetObjectRetentionRequest.h>
 #include <aws/s3/model/UploadPartRequest.h>
 #include <aws/s3/model/CompleteMultipartUploadRequest.h>
 #include <aws/s3/model/AbortMultipartUploadRequest.h>
@@ -346,6 +347,67 @@ bool Abr::S3BackupManager::resolveBackupRetention(const BackupFolderInfo &effect
 }
 
 //
+// How much of a retention is left, in days.
+//
+int Abr::S3BackupManager::retentionDaysLeft(const Aws::Utils::DateTime &retainUntil,
+                                            const Aws::Utils::DateTime &now)
+{
+    const int64_t millis = retainUntil.Millis() - now.Millis();
+
+    if (millis <= 0) {
+        // The date has passed, so the object is not held any more. A retention
+        // that ran out is reported the same way as none at all.
+        return 0;
+    }
+
+    // An object stays retained until the very moment its date is reached, so
+    // the part of a day that is left still counts as a day.
+    const int64_t millisPerDay = static_cast<int64_t>(24) * 60 * 60 * 1000;
+
+    return static_cast<int>((millis + millisPerDay - 1) / millisPerDay);
+}
+
+//
+// What the storage really holds one object under.
+//
+bool Abr::S3BackupManager::readBackupRetention(const std::string &key, ImmutabilityMode &mode, int &days)
+{
+    mode = ImmutabilityMode::NONE;
+    days = 0;
+
+    Aws::S3::Model::GetObjectRetentionRequest request;
+    request.SetBucket(m_folder);
+    request.SetKey(key);
+
+    auto outcome = m_s3_client->GetObjectRetention(request);
+
+    if (!outcome.IsSuccess()) {
+        // Retention is optional at every level: an object written without one
+        // answers NoSuchObjectLockConfiguration, a bucket without Object Lock
+        // InvalidRequest, and S3 compatible targets that do not implement the
+        // API at all NotImplemented or MethodNotAllowed. None of them says
+        // anything is wrong with the backup, so opening it is not failed over
+        // this; the backup is simply not held immutable.
+        return false;
+    }
+
+    const auto &retention = outcome.GetResult().GetRetention();
+
+    mode = toImmutabilityMode(retention.GetMode());
+    days = retentionDaysLeft(retention.GetRetainUntilDate(), Aws::Utils::DateTime::Now());
+
+    // Neither half means anything without the other, the same way a bucket's
+    // default rule is read: a mode whose date has passed no longer retains
+    // anything, and a date without a mode is not enforced.
+    if (mode == ImmutabilityMode::NONE || days <= 0) {
+        mode = ImmutabilityMode::NONE;
+        days = 0;
+    }
+
+    return true;
+}
+
+//
 // Find out whether the bucket can hold immutable backups at all, and in which
 // mode and for how long new backups would be retained.
 //
@@ -571,6 +633,16 @@ bool Abr::S3BackupManager::openBackup(const std::string &path, const std::string
         std::cerr << "Failed to open backup " << name << " in " << path << std::endl;
         return false;
     }
+
+    // A backup keeps no record of its own retention, so it is read back from the
+    // storage. The index file stands for the backup: it is written with the same
+    // Object Lock headers as the rest of it, and without it the backup cannot be
+    // restored at all.
+    ImmutabilityMode mode = ImmutabilityMode::NONE;
+    int days = 0;
+
+    readBackupRetention(join_backup_path(path, name) + Abr::INDEX_FILE_EXT, mode, days);
+    backup->setImmutability(mode, days);
 
     pRestore = backup;
     
