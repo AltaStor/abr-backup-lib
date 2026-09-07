@@ -25,6 +25,7 @@
 #include <aws/s3/model/GetObjectAttributesRequest.h>
 #include <aws/s3/model/GetObjectLockConfigurationRequest.h>
 #include <aws/s3/model/GetObjectRetentionRequest.h>
+#include <aws/s3/model/PutObjectRetentionRequest.h>
 #include <aws/s3/model/UploadPartRequest.h>
 #include <aws/s3/model/CompleteMultipartUploadRequest.h>
 #include <aws/s3/model/AbortMultipartUploadRequest.h>
@@ -316,32 +317,38 @@ bool Abr::S3BackupManager::honoursImmutabilityRequest(const BackupFolderInfo &ef
 bool Abr::S3BackupManager::resolveBackupRetention(const BackupFolderInfo &effective, const BackupInfo &info,
                                                   ObjectLockRetention &retention, std::string &reason)
 {
+    return resolveRetention(effective, info.m_immutabilityMode, info.m_immutabilityDays, retention, reason);
+}
+
+bool Abr::S3BackupManager::resolveRetention(const BackupFolderInfo &effective, ImmutabilityMode mode, int days,
+                                            ObjectLockRetention &retention, std::string &reason)
+{
     retention = ObjectLockRetention();
     reason.clear();
 
-    if (info.m_immutabilityMode == ImmutabilityMode::NONE) {
-        // The backup asked for nothing, so its objects are written without
-        // retention of their own and fall to the bucket's default rule.
+    if (mode == ImmutabilityMode::NONE) {
+        // Nothing was asked for, so the objects are written without retention
+        // of their own and fall to the bucket's default rule.
         return true;
     }
 
-    if (effective.m_immutabilitySupported < info.m_immutabilityMode) {
-        reason = std::string("does not support ") + immutabilityModeName(info.m_immutabilityMode)
+    if (effective.m_immutabilitySupported < mode) {
+        reason = std::string("does not support ") + immutabilityModeName(mode)
             + " immutability";
         return false;
     }
 
     // A mode without a period retains nothing, so a backup that names the one
     // without the other has not said how long it wants to be kept.
-    if (info.m_immutabilityDays <= 0) {
-        reason = std::string("cannot hold a backup in ") + immutabilityModeName(info.m_immutabilityMode)
-            + " mode for " + retentionPeriodName(info.m_immutabilityDays);
+    if (days <= 0) {
+        reason = std::string("cannot hold a backup in ") + immutabilityModeName(mode)
+            + " mode for " + retentionPeriodName(days);
         return false;
     }
 
-    retention.m_mode = info.m_immutabilityMode;
+    retention.m_mode = mode;
     retention.m_retainUntil = Aws::Utils::DateTime::Now()
-        + std::chrono::milliseconds(static_cast<int64_t>(info.m_immutabilityDays) * 24 * 60 * 60 * 1000);
+        + std::chrono::milliseconds(static_cast<int64_t>(days) * 24 * 60 * 60 * 1000);
 
     return true;
 }
@@ -752,6 +759,72 @@ bool Abr::S3BackupManager::deleteBackup(const std::string &path, const std::stri
     bool uploadsAborted = abortPendingUploads(baseName + Abr::DATA_FILE_EXT);
 
     return dataDeleted && indexDeleted && metaDataDeleted && uploadsAborted;
+}
+
+//
+// What the storage is told to hold one object under from now on.
+//
+bool Abr::S3BackupManager::putObjectRetention(const std::string &key, const ObjectLockRetention &retention)
+{
+    Aws::S3::Model::ObjectLockRetention lock;
+    lock.SetMode(retention.m_mode == ImmutabilityMode::COMPLIANCE
+            ? Aws::S3::Model::ObjectLockRetentionMode::COMPLIANCE
+            : Aws::S3::Model::ObjectLockRetentionMode::GOVERNANCE);
+    lock.SetRetainUntilDate(retention.m_retainUntil);
+
+    Aws::S3::Model::PutObjectRetentionRequest request;
+    request.SetBucket(m_folder);
+    request.SetKey(key);
+    request.SetRetention(lock);
+
+    auto outcome = m_s3_client->PutObjectRetention(request);
+
+    if (outcome.IsSuccess()) {
+        return true;
+    }
+
+    // What a target refuses here is its own rule to state -- a compliance
+    // period may only ever be extended, and a governance one may not be
+    // shortened without the permission to bypass it -- so the refusal is
+    // reported as it was given rather than guessed at beforehand.
+    auto err = outcome.GetError();
+    std::cerr << "Error: putObjectRetention: '" << key << "': "
+              << err.GetExceptionName() << ": " << err.GetMessage() << std::endl;
+    return false;
+}
+
+bool Abr::S3BackupManager::updateRetention(const std::string &path, const std::string &name,
+                                           ImmutabilityMode mode, int days)
+{
+    // Lifting a retention is not a thing Object Lock does: a held object stays
+    // held until its date, and PutObjectRetention has no way to say "none".
+    if (mode == ImmutabilityMode::NONE) {
+        std::cerr << "Error: a stored backup cannot be released from immutability" << std::endl;
+        return false;
+    }
+
+    ObjectLockRetention retention;
+    std::string reason;
+
+    if (!resolveRetention(getFolderInfo(), mode, days, retention, reason)) {
+        std::cerr << "Error: '" << m_folder << "' " << reason << std::endl;
+        return false;
+    }
+
+    const std::string baseName = join_backup_path(path, name);
+
+    // Every object the backup is made of has to end up under the same
+    // retention: one left on a shorter period would let the backup be taken
+    // apart before the period the others are held for is out.
+    bool dataHeld = putObjectRetention(baseName + Abr::DATA_FILE_EXT, retention);
+    bool indexHeld = putObjectRetention(baseName + Abr::INDEX_FILE_EXT, retention);
+
+    // The metadata blob is written by a command of its own, so a backup that
+    // was never given one has nothing to hold under that key.
+    const std::string metaKey = baseName + Abr::META_FILE_EXT;
+    bool metaHeld = !isExistingFile(metaKey) || putObjectRetention(metaKey, retention);
+
+    return dataHeld && indexHeld && metaHeld;
 }
 
 bool Abr::S3BackupManager::abortPendingUploads(const std::string &key)

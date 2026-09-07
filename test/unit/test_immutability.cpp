@@ -302,6 +302,52 @@ namespace
         EXPECT_EQ(retention.m_mode, Abr::ImmutabilityMode::COMPLIANCE);
     }
 
+    // ---- what a stored backup is held under from now on -------------------
+
+    // Updating a backup names the mode and the period outright instead of
+    // reading them off the backup, but the retention it lands on is the one
+    // creating it would have written for the same request.
+    TEST(ResolveRetention, MatchesWhatABackupAskingForTheSameWouldBeWritten)
+    {
+        const auto effective = resolved(lockedWith(Abr::ImmutabilityMode::GOVERNANCE, 7));
+        Abr::ObjectLockRetention named;
+        Abr::ObjectLockRetention asked;
+        std::string reason;
+
+        ASSERT_TRUE(Manager::resolveRetention(effective, Abr::ImmutabilityMode::COMPLIANCE, 30,
+                                              named, reason));
+        ASSERT_TRUE(Manager::resolveBackupRetention(effective,
+                                                    backupAsking(Abr::ImmutabilityMode::COMPLIANCE, 30),
+                                                    asked, reason));
+
+        EXPECT_EQ(named.m_mode, asked.m_mode);
+
+        // Both dates are counted off the clock as it stood when each call ran,
+        // so they agree to within the moment between the two.
+        EXPECT_NEAR(static_cast<double>(named.m_retainUntil.Millis()),
+                    static_cast<double>(asked.m_retainUntil.Millis()), 1000.0);
+    }
+
+    TEST(ResolveRetention, RefusesAModeTheBucketCannotHold)
+    {
+        Abr::ObjectLockRetention retention;
+        std::string reason;
+
+        EXPECT_FALSE(Manager::resolveRetention(resolved(Abr::ObjectLockSettings()),
+                                               Abr::ImmutabilityMode::GOVERNANCE, 30, retention, reason));
+        EXPECT_EQ(reason, "does not support governance immutability");
+    }
+
+    TEST(ResolveRetention, RefusesAModeWithoutAPeriod)
+    {
+        Abr::ObjectLockRetention retention;
+        std::string reason;
+
+        EXPECT_FALSE(Manager::resolveRetention(resolved(lockedWith(Abr::ImmutabilityMode::GOVERNANCE, 30)),
+                                               Abr::ImmutabilityMode::COMPLIANCE, 0, retention, reason));
+        EXPECT_EQ(reason, "cannot hold a backup in compliance mode for 0 day(s)");
+    }
+
     // ---- what is left of a retention -------------------------------------
 
     // The retention read back off a stored backup is a date; what the tools

@@ -123,6 +123,9 @@ namespace Abr
 
         bool deleteBackup(const std::string &path, const std::string &name) override;
 
+        bool updateRetention(const std::string &path, const std::string &name,
+                     ImmutabilityMode mode, int days) override;
+
         bool isExistingFile(const std::string &path) const;
 
         bool deleteFile(const std::string &path);
@@ -153,6 +156,13 @@ namespace Abr
         // as a phrase to report after the bucket name.
         static bool resolveBackupRetention(const BackupFolderInfo &effective, const BackupInfo &info,
                                            ObjectLockRetention &retention, std::string &reason);
+
+        // The same, for a mode and a period named on their own rather than read
+        // off a backup. Creating a backup takes them from what it asked for,
+        // updating one from what the caller now wants it held under, and both
+        // have to land on the same retention for the same request.
+        static bool resolveRetention(const BackupFolderInfo &effective, ImmutabilityMode mode, int days,
+                                     ObjectLockRetention &retention, std::string &reason);
 
         // The retention left on an object, counted in the days the tools report.
         // Any part of a day still holds the object, so a remainder counts as a
@@ -200,6 +210,11 @@ namespace Abr
         // that does not implement Object Lock at all -- which leaves `mode` NONE
         // and `days` 0, the same as an expired retention.
         bool readBackupRetention(const std::string &key, ImmutabilityMode &mode, int &days);
+
+        // Writes a retention onto an object that already exists. Unlike
+        // applyRetention(), which stamps one on the way in, this is what changes
+        // the retention of a stored object.
+        bool putObjectRetention(const std::string &key, const ObjectLockRetention &retention);
 
         Aws::S3::S3Client *m_s3_client;
 

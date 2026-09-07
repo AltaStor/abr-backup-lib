@@ -133,6 +133,14 @@ namespace Abr
 
         virtual bool deleteBackup(const std::string &path, const std::string &name) = 0;
 
+        // Changes the immutability a stored backup is already held under to the
+        // given mode and period, the period counted from now. Storage that
+        // holds nothing immutable has no retention to change and refuses.
+        virtual bool updateRetention(const std::string &, const std::string &, ImmutabilityMode, int)
+        {
+            return false;
+        }
+
         const BackupFolderInfo& getFolderInfo() const {
             return m_folderInfo;
         };
