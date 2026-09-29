@@ -5,7 +5,7 @@
 //
 // These are the two decisions behind the Object Lock check S3BackupManager runs
 // while it initialises: what immutability a bucket really applies to new
-// backups, and whether that covers what the caller asked for. Probing a live
+// backups, and whether that stays within what the caller asked for. Probing a live
 // bucket belongs to the btest driven suite; the rules are settled here, where
 // every configuration a bucket can be in is cheap to state.
 //
@@ -114,7 +114,13 @@ namespace
         EXPECT_EQ(effective.m_immutabilityDays, 0);
     }
 
-    // ---- whether it covers the request -----------------------------------
+    // ---- whether it stays within the request -----------------------------
+    //
+    // A request names the most a bucket may do to new backups: the bucket has
+    // to support the mode, and its default retention rule may hold them neither
+    // more firmly nor for longer than asked. A rule that does less is no reason
+    // to refuse, since each backup is written with the retention it asked for
+    // itself (see ResolveBackupRetention below).
 
     TEST(HonoursImmutabilityRequest, AcceptsAnythingWhenNothingWasRequested)
     {
@@ -136,37 +142,42 @@ namespace
         EXPECT_EQ(reason, "does not support governance immutability");
     }
 
-    TEST(HonoursImmutabilityRequest, RefusesObjectLockWithoutADefaultRule)
+    TEST(HonoursImmutabilityRequest, AcceptsObjectLockWithoutADefaultRule)
     {
-        // The bucket could hold immutable backups, but as it stands it would not
-        // apply anything to the ones written here.
+        // Object Lock being on is all the request needs of the bucket. With no
+        // rule on top of it, nothing holds a backup beyond the retention it is
+        // written with.
         const auto effective = resolved(lockedWith(Abr::ImmutabilityMode::NONE, 0));
-        std::string reason;
-
-        EXPECT_FALSE(Manager::honoursImmutabilityRequest(effective,
-                                                         requestOf(Abr::ImmutabilityMode::GOVERNANCE, 30), reason));
-        EXPECT_EQ(reason, "applies no immutability to new backups, while governance was requested");
-    }
-
-    TEST(HonoursImmutabilityRequest, RefusesAWeakerModeThanRequested)
-    {
-        const auto effective = resolved(lockedWith(Abr::ImmutabilityMode::GOVERNANCE, 30));
-        std::string reason;
-
-        EXPECT_FALSE(Manager::honoursImmutabilityRequest(effective,
-                                                         requestOf(Abr::ImmutabilityMode::COMPLIANCE, 30), reason));
-        EXPECT_EQ(reason, "applies governance immutability to new backups, while compliance was requested");
-    }
-
-    TEST(HonoursImmutabilityRequest, AcceptsAStrongerModeThanRequested)
-    {
-        // Compliance holds a backup at least as firmly as governance does, so a
-        // caller asking for the weaker one has nothing to complain about.
-        const auto effective = resolved(lockedWith(Abr::ImmutabilityMode::COMPLIANCE, 30));
         std::string reason;
 
         EXPECT_TRUE(Manager::honoursImmutabilityRequest(effective,
                                                         requestOf(Abr::ImmutabilityMode::GOVERNANCE, 30), reason));
+        EXPECT_TRUE(reason.empty());
+    }
+
+    TEST(HonoursImmutabilityRequest, AcceptsAWeakerModeThanRequested)
+    {
+        // A governance rule holds nothing beyond the compliance retention the
+        // backups are written with.
+        const auto effective = resolved(lockedWith(Abr::ImmutabilityMode::GOVERNANCE, 30));
+        std::string reason;
+
+        EXPECT_TRUE(Manager::honoursImmutabilityRequest(effective,
+                                                        requestOf(Abr::ImmutabilityMode::COMPLIANCE, 30), reason));
+        EXPECT_TRUE(reason.empty());
+    }
+
+    TEST(HonoursImmutabilityRequest, RefusesAStrongerModeThanRequested)
+    {
+        // A governance hold can be lifted by whoever may bypass it, a compliance
+        // one by nobody, so a compliance rule would hold new backups more firmly
+        // than the caller asked for.
+        const auto effective = resolved(lockedWith(Abr::ImmutabilityMode::COMPLIANCE, 30));
+        std::string reason;
+
+        EXPECT_FALSE(Manager::honoursImmutabilityRequest(effective,
+                                                         requestOf(Abr::ImmutabilityMode::GOVERNANCE, 30), reason));
+        EXPECT_EQ(reason, "applies compliance immutability to new backups, while governance was requested");
     }
 
     TEST(HonoursImmutabilityRequest, AcceptsTheExactModeAndPeriodRequested)
@@ -179,19 +190,11 @@ namespace
         EXPECT_TRUE(reason.empty());
     }
 
-    TEST(HonoursImmutabilityRequest, RefusesAShorterPeriodThanRequested)
+    TEST(HonoursImmutabilityRequest, AcceptsAShorterPeriodThanRequested)
     {
+        // The rule's seven days end well before the thirty the backups are
+        // written with, so it holds them no longer than asked.
         const auto effective = resolved(lockedWith(Abr::ImmutabilityMode::GOVERNANCE, 7));
-        std::string reason;
-
-        EXPECT_FALSE(Manager::honoursImmutabilityRequest(effective,
-                                                         requestOf(Abr::ImmutabilityMode::GOVERNANCE, 30), reason));
-        EXPECT_EQ(reason, "retains new backups for 7 day(s), less than the requested 30 day(s)");
-    }
-
-    TEST(HonoursImmutabilityRequest, AcceptsALongerPeriodThanRequested)
-    {
-        const auto effective = resolved(lockedWith(Abr::ImmutabilityMode::GOVERNANCE, 365));
         std::string reason;
 
         EXPECT_TRUE(Manager::honoursImmutabilityRequest(effective,
@@ -199,18 +202,44 @@ namespace
         EXPECT_TRUE(reason.empty());
     }
 
-    TEST(HonoursImmutabilityRequest, AcceptsAModeRequestedWithoutAPeriod)
+    TEST(HonoursImmutabilityRequest, RefusesALongerPeriodThanRequested)
     {
-        // Asking for compliance and no period in particular still requires a
-        // rule to be in place, since a mode alone is never in effect.
-        const auto effective = resolved(lockedWith(Abr::ImmutabilityMode::COMPLIANCE, 30));
+        // A year-long rule would keep every new backup undeletable for eleven
+        // months past the period the caller asked for.
+        const auto effective = resolved(lockedWith(Abr::ImmutabilityMode::GOVERNANCE, 365));
         std::string reason;
 
-        EXPECT_TRUE(Manager::honoursImmutabilityRequest(effective,
-                                                        requestOf(Abr::ImmutabilityMode::COMPLIANCE, 0), reason));
+        EXPECT_FALSE(Manager::honoursImmutabilityRequest(effective,
+                                                         requestOf(Abr::ImmutabilityMode::GOVERNANCE, 30), reason));
+        EXPECT_EQ(reason, "retains new backups for 365 day(s), longer than the requested 30 day(s)");
+    }
 
-        EXPECT_FALSE(Manager::honoursImmutabilityRequest(resolved(lockedWith(Abr::ImmutabilityMode::NONE, 0)),
+    TEST(HonoursImmutabilityRequest, RefusesAnyRuleForAModeRequestedWithoutAPeriod)
+    {
+        // Asking for a mode and no period in particular leaves no room for a
+        // rule's period: any at all is longer than none. Only a bucket without
+        // a rule stays within the request.
+        std::string reason;
+
+        EXPECT_FALSE(Manager::honoursImmutabilityRequest(resolved(lockedWith(Abr::ImmutabilityMode::COMPLIANCE, 30)),
                                                          requestOf(Abr::ImmutabilityMode::COMPLIANCE, 0), reason));
+        EXPECT_EQ(reason, "retains new backups for 30 day(s), longer than the requested 0 day(s)");
+
+        EXPECT_TRUE(Manager::honoursImmutabilityRequest(resolved(lockedWith(Abr::ImmutabilityMode::NONE, 0)),
+                                                        requestOf(Abr::ImmutabilityMode::COMPLIANCE, 0), reason));
+        EXPECT_TRUE(reason.empty());
+    }
+
+    TEST(HonoursImmutabilityRequest, ChecksTheModeBeforeThePeriod)
+    {
+        // A rule that goes too far on both counts is reported for its mode,
+        // which is checked first.
+        const auto effective = resolved(lockedWith(Abr::ImmutabilityMode::COMPLIANCE, 365));
+        std::string reason;
+
+        EXPECT_FALSE(Manager::honoursImmutabilityRequest(effective,
+                                                         requestOf(Abr::ImmutabilityMode::GOVERNANCE, 30), reason));
+        EXPECT_EQ(reason, "applies compliance immutability to new backups, while governance was requested");
     }
 
     // ---- what one backup is written with ----------------------------------

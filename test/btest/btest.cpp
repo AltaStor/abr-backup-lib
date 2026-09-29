@@ -305,10 +305,10 @@ Usage:
         -f, --file     Use a local folder instead of an S3 bucket
         -c, --create   Create the folder/bucket when it is missing
         -i, --immutable <mode>
-                       Require none, governance or compliance immutability (S3 only),
-                       and hold the backups written by this run in that mode
+                       Hold the backups written by this run in none, governance
+                       or compliance mode (S3 only)
         -r, --retention <days>
-                       Require a retention period of at least <days> days, needs -i
+                       Hold them for <days> days, needs -i
       Commands and parameters:
         list [<path>]
         backup <path> <name>
@@ -319,9 +319,12 @@ Usage:
 Where:
     bucket/dir - The name of the bucket/folder that contains the objects.
     path - The path within the folder to list objects.
-    mode - none, governance or compliance. The bucket has to apply at least
-           the requested mode to new backups, otherwise btest stops here.
-    days - the number of days new backups have to be retained for.
+    mode - none, governance or compliance. The bucket has to support the mode,
+           and its default retention rule must not apply a stronger one to new
+           backups, otherwise btest stops here.
+    days - the number of days the backups written by this run are held for. A
+           default retention rule that holds new backups for longer stops btest
+           here too.
 )" << std::endl;
 
     return 1;
@@ -405,7 +408,8 @@ int main(int argc, char* argv[])
         params.m_pathStyle = true; // Use path-style addressing for S3 buckets
 
         // Checked while the manager initializes: it probes the bucket and gives
-        // up when what is asked for here is more than the bucket applies.
+        // up when the bucket cannot hold the mode asked for here, or when its
+        // default rule would hold new backups more firmly or for longer.
         params.m_immutabilityMode = immutability;
         params.m_immutabilityDays = immutabilityDays;
 

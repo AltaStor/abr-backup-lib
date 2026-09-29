@@ -80,6 +80,10 @@ namespace Abr
 
 namespace
 {
+    // The modes below are POSIX ones. On Windows std::filesystem can only turn them
+    // into the read-only attribute -- which they leave off, since the owner may
+    // write -- and who can read a repository there is down to its ACL instead.
+
     // rwxr-x--- : full access for the owner, traverse/read for the group, nothing for others.
     constexpr fs::perms BACKUP_FOLDER_PERMS =
         fs::perms::owner_all | fs::perms::group_read | fs::perms::group_exec;
@@ -176,6 +180,12 @@ bool Abr::FileBackupManager::initialize(const Abr::BackupManagerParams& params)
         std::cerr << "'" << params.m_folder << "' is not a directory!" << std::endl;
         return false;
     } else {
+#ifdef _WIN32
+        // Nothing to check: Windows has no mode bits, and std::filesystem makes
+        // them up from the read-only attribute, so every writable folder reads
+        // as 0777 and none could pass the check below. The folder's ACL, which
+        // it inherits from where it was created, decides who can read it.
+#else
         // An existing folder is only used when it is not more permissive than 0750,
         // otherwise the backup content would be readable/writable by unrelated users
         fs::perms perms = fs::status(dirPath, ec).permissions();
@@ -205,6 +215,7 @@ bool Abr::FileBackupManager::initialize(const Abr::BackupManagerParams& params)
             std::cerr << "Changed permissions of '" << params.m_folder << "' from " << permsToOctal(perms)
                       << " to " << permsToOctal(perms & ~extra) << "." << std::endl;
         }
+#endif
     }
 
     m_folder = params.m_folder;
@@ -221,7 +232,9 @@ bool Abr::FileBackupManager::listBackups(const std::string &path, std::vector<st
         if (fs::exists(dir_path) && fs::is_directory(dir_path)) {
             for (const auto& entry : fs::directory_iterator(dir_path)) {
                 if (fs::is_regular_file(entry.status())) {
-                    std::string ext = entry.path().extension();
+                    // .string() rather than a conversion: a path converts to its native
+                    // string, which is std::wstring on Windows.
+                    std::string ext = entry.path().extension().string();
                     if(ext == Abr::INDEX_FILE_EXT) {
                         std::string name = entry.path().filename().string();
                         name.erase(name.length() - ext.length());

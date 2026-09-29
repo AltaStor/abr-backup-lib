@@ -17,11 +17,33 @@
 #include <system_error>
 #include <vector>
 
+#ifdef _WIN32
+#include <process.h>
+#else
 #include <unistd.h>
+#endif
 
 namespace ut
 {
     namespace fs = std::filesystem;
+
+    // Whether files carry POSIX permission bits. Windows has none: std::filesystem
+    // makes them up from the read-only attribute, so a test about the modes the
+    // file backend sets has nothing to check there.
+#ifdef _WIN32
+    constexpr bool kPosixModes = false;
+#else
+    constexpr bool kPosixModes = true;
+#endif
+
+    inline long processId()
+    {
+#ifdef _WIN32
+        return static_cast<long>(::_getpid());
+#else
+        return static_cast<long>(::getpid());
+#endif
+    }
 
     //
     // Redirects std::cerr for as long as it is alive, so a test can assert on the
@@ -79,7 +101,7 @@ namespace ut
             static std::atomic<unsigned> counter{ 0 };
 
             m_path = fs::temp_directory_path() /
-                     ("abr-unit-" + std::to_string(static_cast<long>(::getpid())) + "-" +
+                     ("abr-unit-" + std::to_string(processId()) + "-" +
                       std::to_string(counter++));
 
             std::error_code ec;
@@ -153,10 +175,12 @@ namespace ut
         return ec ? 0u : (static_cast<unsigned>(perms) & static_cast<unsigned>(fs::perms::all));
     }
 
+#ifndef _WIN32
     inline bool runningAsRoot()
     {
         return ::geteuid() == 0;
     }
+#endif
 
     // Offset of the first byte that is not zero, or -1 when the block is empty.
     inline long firstNonZero(const void *data, size_t length)

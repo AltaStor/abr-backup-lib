@@ -115,7 +115,9 @@ namespace
         ASSERT_TRUE(fs::is_directory(created));
 
         // A repository holds backup data, so it must not be readable by others.
-        EXPECT_EQ(ut::modeOf(created), 0750u);
+        if (ut::kPosixModes) {
+            EXPECT_EQ(ut::modeOf(created), 0750u);
+        }
     }
 
     TEST_F(FileBackupManagerTest, InitializeCreatesEveryMissingParentProtected)
@@ -124,11 +126,15 @@ namespace
 
         ASSERT_NE(openManager(true, nested.string()), nullptr);
 
+        ASSERT_TRUE(fs::is_directory(nested));
+
         // create_directories() would apply the umask and leave the parents world
         // readable, so each level is created and tightened in turn.
-        EXPECT_EQ(ut::modeOf(tempDir / "tenant"), 0750u);
-        EXPECT_EQ(ut::modeOf(tempDir.path() / "tenant" / "site"), 0750u);
-        EXPECT_EQ(ut::modeOf(nested), 0750u);
+        if (ut::kPosixModes) {
+            EXPECT_EQ(ut::modeOf(tempDir / "tenant"), 0750u);
+            EXPECT_EQ(ut::modeOf(tempDir.path() / "tenant" / "site"), 0750u);
+            EXPECT_EQ(ut::modeOf(nested), 0750u);
+        }
     }
 
     TEST_F(FileBackupManagerTest, InitializeRejectsAPathThatIsNotADirectory)
@@ -143,6 +149,10 @@ namespace
 
     TEST_F(FileBackupManagerTest, InitializeRejectsAFolderThatIsTooPermissive)
     {
+        if (!ut::kPosixModes) {
+            GTEST_SKIP() << "no permission bits to check on this platform";
+        }
+
         std::error_code ec;
         fs::permissions(tempDir.path(), fs::perms::all, fs::perm_options::replace, ec);
         ASSERT_FALSE(ec);
@@ -156,6 +166,10 @@ namespace
 
     TEST_F(FileBackupManagerTest, InitializeTightensAFolderItWasAskedToSetUp)
     {
+        if (!ut::kPosixModes) {
+            GTEST_SKIP() << "no permission bits to tighten on this platform";
+        }
+
         std::error_code ec;
         fs::permissions(tempDir.path(), fs::perms::all, fs::perm_options::replace, ec);
         ASSERT_FALSE(ec);
@@ -169,6 +183,10 @@ namespace
 
     TEST_F(FileBackupManagerTest, InitializeKeepsAStricterFolderAsItIs)
     {
+        if (!ut::kPosixModes) {
+            GTEST_SKIP() << "no permission bits to keep on this platform";
+        }
+
         std::error_code ec;
         fs::permissions(tempDir.path(), fs::perms::owner_all, fs::perm_options::replace, ec);
         ASSERT_FALSE(ec);
@@ -351,6 +369,10 @@ namespace
 
     TEST_F(FileBackupManagerTest, TheBackupFilesAreNotReadableByOthers)
     {
+        if (!ut::kPosixModes) {
+            GTEST_SKIP() << "no permission bits to check on this platform";
+        }
+
         auto manager = openManager();
         ASSERT_NE(manager, nullptr);
 
@@ -369,8 +391,10 @@ namespace
         ASSERT_NO_FATAL_FAILURE(
             writeBackup(manager, ut::patternBuffer(0x1000, 0x1000), "tenant/vm-07"));
 
-        EXPECT_EQ(ut::modeOf(tempDir.path() / "tenant"), 0750u);
-        EXPECT_EQ(ut::modeOf(tempDir.path() / "tenant" / "vm-07"), 0750u);
+        if (ut::kPosixModes) {
+            EXPECT_EQ(ut::modeOf(tempDir.path() / "tenant"), 0750u);
+            EXPECT_EQ(ut::modeOf(tempDir.path() / "tenant" / "vm-07"), 0750u);
+        }
 
         std::shared_ptr<Abr::IRestore> restore;
         ASSERT_TRUE(manager->openBackup("tenant/vm-07", kName, restore));
