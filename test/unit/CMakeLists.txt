@@ -52,9 +52,11 @@ target_link_libraries(abr_unit_tests
     PRIVATE
         backuplib
         GTest::gtest
-        # The tests recompute the checksums the library stored, instead of
-        # trusting the library to agree with itself.
+        # The tests recompute the checksums the library stored, and decrypt a
+        # stored chunk by hand, instead of trusting the library to agree with
+        # itself.
         ${CRC32C_LINK_TARGET}
+        OpenSSL::Crypto
 )
 
 include(GoogleTest)

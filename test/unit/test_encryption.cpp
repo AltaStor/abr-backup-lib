@@ -13,8 +13,11 @@
 #include <gtest/gtest.h>
 
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
+
+#include <openssl/evp.h>
 
 #include "core_fixture.h"
 
@@ -100,6 +103,68 @@ namespace
 
         // AES-256-GCM appends a 16 byte tag to the ciphertext.
         EXPECT_EQ(records[0].chunk_length, records[0].orig_length + 16);
+    }
+
+    TEST_F(EncryptionTest, TheStoredChunkDecryptsWithTheDocumentedKeyAndNonce)
+    {
+        // Rebuilds the whole key and nonce chain with plain OpenSSL calls, so any
+        // change in how the library derives them breaks this test before it can
+        // break the backups already written with it:
+        //   KEK   = SHA-256(secret)
+        //   DEK   = AES-256-CTR(KEK, header IV) over the wrapped key
+        //   nonce = first 12 bytes of the header IV, the chunk's original offset
+        //           XORed little-endian into the first 8 of them
+        //   chunk = AES-256-GCM(DEK, nonce) ciphertext followed by a 16 byte tag
+        const uint64_t offset = 0x0102030405060000ull;
+        const auto original = ut::randomBuffer(0x1000, 0x5eed);
+
+        auto info = encryptedInfo();
+        info.sectors = (offset + 0x10000) / info.sectorSize;
+        writeBackup(info, { { offset, original } }, kKey);
+
+        const auto header = readHeader();
+        const auto records = readRecords();
+        ASSERT_EQ(records.size(), 1u);
+        ASSERT_EQ(records[0].orig_offset, offset);
+
+        const auto *data = repo.find(ut::dataName(kPath, kName));
+        ASSERT_NE(data, nullptr);
+
+        unsigned char kek[32];
+        unsigned int kekLen = 0;
+        ASSERT_EQ(EVP_Digest(kKey.data(), kKey.size(), kek, &kekLen, EVP_sha256(), nullptr), 1);
+        ASSERT_EQ(kekLen, 32u);
+
+        unsigned char dek[32];
+        int len = 0;
+        std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)> holder(EVP_CIPHER_CTX_new(),
+                                                                           EVP_CIPHER_CTX_free);
+        EVP_CIPHER_CTX *ctx = holder.get();
+        ASSERT_NE(ctx, nullptr);
+        ASSERT_EQ(EVP_DecryptInit_ex(ctx, EVP_aes_256_ctr(), nullptr, kek, header.encryption_iv), 1);
+        ASSERT_EQ(EVP_DecryptUpdate(ctx, dek, &len, header.encryption_key, sizeof(header.encryption_key)), 1);
+        ASSERT_EQ(len, 32);
+
+        unsigned char nonce[12];
+        memcpy(nonce, header.encryption_iv, sizeof(nonce));
+        for (int i = 0; i < 8; i++) {
+            nonce[i] ^= static_cast<unsigned char>(offset >> (i * 8));
+        }
+
+        const auto *chunk = reinterpret_cast<const unsigned char *>(data->data() + records[0].chunk_offset);
+        const int cipherLen = static_cast<int>(records[0].chunk_length) - 16;
+        ASSERT_EQ(cipherLen, static_cast<int>(original.size()));
+
+        std::vector<char> plain(original.size());
+        ASSERT_EQ(EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr), 1);
+        ASSERT_EQ(EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, sizeof(nonce), nullptr), 1);
+        ASSERT_EQ(EVP_DecryptInit_ex(ctx, nullptr, nullptr, dek, nonce), 1);
+        ASSERT_EQ(EVP_DecryptUpdate(ctx, reinterpret_cast<unsigned char *>(plain.data()), &len, chunk, cipherLen), 1);
+        ASSERT_EQ(EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, 16, const_cast<unsigned char *>(chunk + cipherLen)), 1);
+        EXPECT_EQ(EVP_DecryptFinal_ex(ctx, reinterpret_cast<unsigned char *>(plain.data()) + len, &len), 1)
+            << "the authentication tag does not match the documented nonce";
+
+        EXPECT_EQ(plain, original);
     }
 
     TEST_F(EncryptionTest, EveryBackupGetsFreshKeyMaterial)

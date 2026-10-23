@@ -8,6 +8,7 @@
 #include <iostream>
 #include <memory>
 #include <algorithm>
+#include <bit>
 #include <cstring>
 #include <assert.h>
 #include <zstd.h>
@@ -18,6 +19,26 @@
 #include "crc32c/crc32c.h"
 
 static_assert(sizeof(Abr::IndexHeader) == Abr::INDEX_FILE_HEADER_SIZE, "ABR IndexHeader size mismatch");
+static_assert(sizeof(Abr::IndexRecord) == Abr::INDEX_FILE_RECORD_SIZE, "ABR IndexRecord size mismatch");
+
+// The index is written and read as the in-memory image of IndexHeader and IndexRecord, and the format defines that
+// image as little-endian. A big-endian build would write backups no other build can read, so it is refused here
+// rather than left to produce them.
+static_assert(std::endian::native == std::endian::little, "ABR index format requires a little-endian host");
+
+// AES-256-GCM is used with the standard 12-byte nonce. The header keeps a 16-byte IV, of which only the first 12
+// bytes form the nonce: that is what OpenSSL used when the IV length was left at its default, and every existing
+// encrypted backup depends on exactly that. The chunk's original offset is XORed little-endian into the first 8
+// bytes, so each chunk of a backup gets its own nonce under the backup's own key.
+static const int kGcmNonceLength = 12;
+
+static void makeChunkNonce(const uint8_t iv[16], uint64_t offset, uint8_t nonce[kGcmNonceLength])
+{
+    memcpy(nonce, iv, kGcmNonceLength);
+    for (size_t i = 0; i < sizeof(offset); ++i) {
+        nonce[i] ^= (offset >> (i * 8)) & 0xFF;
+    }
+}
 
 static bool deriveEncryptionKey(const std::string &password, uint8_t derivedKey[32])
 {
@@ -311,19 +332,22 @@ int Abr::BackupCore::encryptData(const void *input, int inlen, void *output, int
     int len = 0;
 
     do {
-        unsigned char iv[16];
-        memcpy(iv, m_cryptoIV, sizeof(iv));
-        for (int i = 0; i < sizeof(offset); ++i) {
-            iv[i] ^= (offset >> (i * 8)) & 0xFF;
-        }
-        
+        unsigned char nonce[kGcmNonceLength];
+        makeChunkNonce(m_cryptoIV, offset, nonce);
+
         rv = EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr);
         if (rv != 1) {
             std::cerr << "Failed to init AES-GCM cipher" << std::endl;
             break;
         }
 
-        rv = EVP_EncryptInit_ex(ctx, nullptr, nullptr, m_cryptoKey, iv);
+        rv = EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, kGcmNonceLength, nullptr);
+        if (rv != 1) {
+            std::cerr << "Failed to set AES-GCM nonce length" << std::endl;
+            break;
+        }
+
+        rv = EVP_EncryptInit_ex(ctx, nullptr, nullptr, m_cryptoKey, nonce);
         if (rv != 1) {
             std::cerr << "Failed to init AES-GCM key/IV" << std::endl;
             break;
@@ -833,6 +857,20 @@ bool Abr::RestoreCore::open(const std::string &path, const std::string &name, co
         }
     }
 
+    // The format reserves file_id for backups split across several data files, but only one data file is ever
+    // written and only that one is opened below. A record pointing into another file would be read from the wrong
+    // place, so such a backup is refused rather than restored with wrong data.
+    for (uint32_t i = 0; i < m_numIndexRecords; i++) {
+        if (m_pIndexRecords[i].file_id != 0) {
+            std::cerr << "Index record " << i << " in file " << indexPath << " refers to data file "
+                      << static_cast<unsigned>(m_pIndexRecords[i].file_id)
+                      << ", only single data file backups are supported" << std::endl;
+            delete[] m_pIndexRecords;
+            m_pIndexRecords = nullptr;
+            return false;
+        }
+    }
+
     std::string dataPath = join_backup_path(path, name) + Abr::DATA_FILE_EXT;
 
     m_hDataFile = openFile(dataPath);
@@ -882,11 +920,8 @@ int Abr::RestoreCore::decryptData(const void *input, int inlen, void *output, in
     unsigned char *tag = reinterpret_cast<unsigned char *>(const_cast<void *>(input)) + inlen;
 
     do {
-        unsigned char iv[16];
-        memcpy(iv, m_cryptoIV, sizeof(iv));
-        for (int i = 0; i < sizeof(offset); ++i) {
-            iv[i] ^= (offset >> (i * 8)) & 0xFF;
-        }
+        unsigned char nonce[kGcmNonceLength];
+        makeChunkNonce(m_cryptoIV, offset, nonce);
 
         rv = EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr);
         if (rv != 1) {
@@ -894,7 +929,13 @@ int Abr::RestoreCore::decryptData(const void *input, int inlen, void *output, in
             break;
         }
 
-        rv = EVP_DecryptInit_ex(ctx, nullptr, nullptr, m_cryptoKey, iv);
+        rv = EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, kGcmNonceLength, nullptr);
+        if (rv != 1) {
+            std::cerr << "Failed to set AES-GCM nonce length" << std::endl;
+            break;
+        }
+
+        rv = EVP_DecryptInit_ex(ctx, nullptr, nullptr, m_cryptoKey, nonce);
         if (rv != 1) {
             std::cerr << "Failed to init AES-GCM key/IV" << std::endl;
             break;

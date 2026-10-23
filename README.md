@@ -25,7 +25,8 @@ The on-disk format is defined in [inc/abr_backup_format.h](inc/abr_backup_format
 
 The header, the record array and every chunk carry a CRC32C, and a reader
 checks all of them; a stored zero is checked like any other value rather
-than read as "no checksum".
+than read as "no checksum". A reader also refuses a backup whose records
+point into a data file other than the single one it opens.
 
 A backup can be `full` or `incremental`; an incremental backup stores only
 the blocks that changed since its parent and is not restorable on its own.

@@ -172,6 +172,19 @@ namespace
         EXPECT_TRUE(cerr.contains("Index records CRC32C mismatch")) << cerr.text();
     }
 
+    TEST_F(RestoreCoreTest, OpenRefusesARecordInAnotherDataFile)
+    {
+        buildDefaultBackup();
+
+        // Only the backup's single data file is opened, so a record that points
+        // into another one would be read from the wrong place.
+        rewriteRecord(1, [](Abr::IndexRecord &record) { record.file_id = 1; });
+
+        ut::CerrCapture cerr;
+        EXPECT_FALSE(newRestore()->open(kPath, kName));
+        EXPECT_TRUE(cerr.contains("refers to data file 1")) << cerr.text();
+    }
+
     TEST_F(RestoreCoreTest, OpenFailsWhenAnIndexRecordIsCorrupted)
     {
         buildDefaultBackup();
