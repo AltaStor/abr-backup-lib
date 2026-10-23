@@ -729,7 +729,9 @@ bool Abr::RestoreCore::open(const std::string &path, const std::string &name, co
         return false;
     }
 
-    if (indexHeader.header_crc32c) {
+    // Every writer stores the checksums, so a zero is checked like any other value: it is either the real CRC32C
+    // of the data or a sign of damage, never a marker for "not checksummed".
+    {
         uint32_t savedHeaderCrc = indexHeader.header_crc32c;
         uint32_t computedHeaderCrc = 0;
 
@@ -819,7 +821,8 @@ bool Abr::RestoreCore::open(const std::string &path, const std::string &name, co
 
     closeFile(hIndexFile);
 
-    if (indexSize > 0 && indexHeader.index_crc32c) {
+    // A backup without records has no index checksum to check: the writer leaves the field zero then.
+    if (indexSize > 0) {
         uint32_t computedIndexCrc = 0;
         computedIndexCrc = crc32c::Crc32c(reinterpret_cast<const uint8_t *>(m_pIndexRecords), indexSize);
         if (computedIndexCrc != indexHeader.index_crc32c) {
@@ -937,7 +940,7 @@ bool Abr::RestoreCore::loadDataRange(uint32_t rangeIndex, void *pDataBuf, uint32
         return false;
     }
 
-    if (m_info.compression == 0 && m_info.encryption == 0 && record.chunk_crc32c != 0 && 
+    if (m_info.compression == 0 && m_info.encryption == 0 &&
         offset == 0 && length == record.orig_length && record.chunk_length == record.orig_length) {
         // Fast path: uncompressed full-chunk read with CRC
         
@@ -967,13 +970,10 @@ bool Abr::RestoreCore::loadDataRange(uint32_t rangeIndex, void *pDataBuf, uint32
         return false;
     }
 
-    if (record.chunk_crc32c != 0) {
-        uint32_t computedIndexCrc = 0;
-        computedIndexCrc = crc32c::Crc32c(reinterpret_cast<const uint8_t *>(storedBuf.get()), record.chunk_length);
-        if (computedIndexCrc != record.chunk_crc32c) {
-            std::cerr << "CRC32C mismatch for restored chunk " << rangeIndex << "!" << std::endl;
-            return false;
-        }
+    uint32_t computedChunkCrc = crc32c::Crc32c(reinterpret_cast<const uint8_t *>(storedBuf.get()), record.chunk_length);
+    if (computedChunkCrc != record.chunk_crc32c) {
+        std::cerr << "CRC32C mismatch for restored chunk " << rangeIndex << "!" << std::endl;
+        return false;
     }
 
     std::unique_ptr<char[]> payloadBuf;
@@ -1030,11 +1030,6 @@ bool Abr::RestoreCore::checkDataRange(uint32_t rangeIndex, std::vector<char> &te
     }
 
     auto &record = *(m_pIndexRecords + rangeIndex);
-
-    if (record.chunk_crc32c == 0) {
-        // It's an old backup without CRC, so we cannot verify the data integrity
-        return true;
-    }
 
     // Read stored chunk into temporary buffer
 

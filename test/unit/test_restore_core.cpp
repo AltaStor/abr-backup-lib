@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
@@ -35,6 +36,27 @@ namespace
         {
             writeBackup(ut::defaultInfo(), { { 0, ut::patternBuffer(0x1000, 0x1000, 'A') },
                                              { 0x8000, ut::patternBuffer(0x1000, 0x1000, 'N') } });
+        }
+
+        // Rewrites one stored index record and repairs the index and header
+        // checksums over it, but not the chunk checksum, so the change reaches
+        // whatever validation the test aims at.
+        void rewriteRecord(uint32_t recordIndex, const std::function<void(Abr::IndexRecord &)> &change)
+        {
+            auto *index = repo.find(indexFile());
+            ASSERT_NE(index, nullptr);
+
+            auto records = readRecords();
+            ASSERT_LT(recordIndex, records.size());
+
+            change(records[recordIndex]);
+
+            const size_t recordBytes = records.size() * sizeof(Abr::IndexRecord);
+            memcpy(index->data() + Abr::INDEX_FILE_HEADER_SIZE, records.data(), recordBytes);
+
+            patchHeader<uint32_t>(offsetof(Abr::IndexHeader, index_crc32c),
+                crc32c::Crc32c(reinterpret_cast<const uint8_t *>(records.data()), recordBytes));
+            resealHeader();
         }
     };
 
@@ -124,6 +146,30 @@ namespace
         ut::CerrCapture cerr;
         EXPECT_FALSE(newRestore()->open(kPath, kName));
         EXPECT_TRUE(cerr.contains("Header CRC32C mismatch")) << cerr.text();
+    }
+
+    TEST_F(RestoreCoreTest, OpenFailsWhenTheHeaderChecksumIsZeroed)
+    {
+        buildDefaultBackup();
+
+        // Zero is not a marker for "no checksum": every writer stores one, so a
+        // zeroed field is damage like any other.
+        patchHeader<uint32_t>(offsetof(Abr::IndexHeader, header_crc32c), 0);
+
+        ut::CerrCapture cerr;
+        EXPECT_FALSE(newRestore()->open(kPath, kName));
+        EXPECT_TRUE(cerr.contains("Header CRC32C mismatch")) << cerr.text();
+    }
+
+    TEST_F(RestoreCoreTest, OpenFailsWhenTheIndexChecksumIsZeroed)
+    {
+        buildDefaultBackup();
+        patchHeader<uint32_t>(offsetof(Abr::IndexHeader, index_crc32c), 0);
+        resealHeader();
+
+        ut::CerrCapture cerr;
+        EXPECT_FALSE(newRestore()->open(kPath, kName));
+        EXPECT_TRUE(cerr.contains("Index records CRC32C mismatch")) << cerr.text();
     }
 
     TEST_F(RestoreCoreTest, OpenFailsWhenAnIndexRecordIsCorrupted)
@@ -394,6 +440,29 @@ namespace
         EXPECT_TRUE(restore->close());
     }
 
+    TEST_F(RestoreCoreTest, LoadFailsWhenTheChunkChecksumIsZeroed)
+    {
+        buildDefaultBackup();
+        rewriteRecord(1, [](Abr::IndexRecord &record) { record.chunk_crc32c = 0; });
+
+        auto restore = newRestore();
+        ASSERT_TRUE(restore->open(kPath, kName));
+
+        std::vector<char> loaded(0x1000, 0);
+
+        ASSERT_TRUE(restore->loadDataRange(0, loaded.data(), loaded.size(), 0)) << "the first chunk is untouched";
+
+        ut::CerrCapture cerr;
+        EXPECT_FALSE(restore->loadDataRange(1, loaded.data(), loaded.size(), 0));
+        EXPECT_TRUE(cerr.contains("CRC32C mismatch")) << cerr.text();
+
+        // A partial read takes the other path through the loader and must check
+        // the chunk all the same.
+        EXPECT_FALSE(restore->loadDataRange(1, loaded.data(), 0x100, 0x100));
+
+        EXPECT_TRUE(restore->close());
+    }
+
     TEST_F(RestoreCoreTest, LoadFailsWhenTheDataFileIsTruncated)
     {
         buildDefaultBackup();
@@ -441,6 +510,21 @@ namespace
         ASSERT_TRUE(restore->open(kPath, kName));
 
         ASSERT_TRUE(repo.corrupt(dataFile(), 0x1080));
+
+        std::vector<char> tempBuf;
+        EXPECT_TRUE(restore->checkDataRange(0, tempBuf)) << "the first chunk is untouched";
+        EXPECT_FALSE(restore->checkDataRange(1, tempBuf));
+
+        EXPECT_TRUE(restore->close());
+    }
+
+    TEST_F(RestoreCoreTest, CheckRejectsAChunkWhoseChecksumIsZeroed)
+    {
+        buildDefaultBackup();
+        rewriteRecord(1, [](Abr::IndexRecord &record) { record.chunk_crc32c = 0; });
+
+        auto restore = newRestore();
+        ASSERT_TRUE(restore->open(kPath, kName));
 
         std::vector<char> tempBuf;
         EXPECT_TRUE(restore->checkDataRange(0, tempBuf)) << "the first chunk is untouched";

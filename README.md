@@ -23,6 +23,10 @@ metadata blob:
 
 The on-disk format is defined in [inc/abr_backup_format.h](inc/abr_backup_format.h).
 
+The header, the record array and every chunk carry a CRC32C, and a reader
+checks all of them; a stored zero is checked like any other value rather
+than read as "no checksum".
+
 A backup can be `full` or `incremental`; an incremental backup stores only
 the blocks that changed since its parent and is not restorable on its own.
 
