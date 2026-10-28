@@ -377,6 +377,108 @@ namespace
         EXPECT_EQ(reason, "cannot hold a backup in compliance mode for 0 day(s)");
     }
 
+    // ---- held until a moment named outright -------------------------------
+
+    // A caller that holds several backups until the same moment names the moment itself, so that
+    // the time each backup takes to write does not move its date. The clock is stated outright,
+    // which makes the dates exact.
+    const int64_t kSecondsNow = 1'700'000'000;
+    const int64_t kSecondsPerDay = static_cast<int64_t>(24) * 60 * 60;
+
+    Aws::Utils::DateTime atSeconds(int64_t seconds)
+    {
+        return Aws::Utils::DateTime(seconds * 1000);
+    }
+
+    TEST(ResolveRetentionUntil, HoldsTheBackupUntilTheNamedMoment)
+    {
+        const auto effective = resolved(lockedWith(Abr::ImmutabilityMode::GOVERNANCE, 7));
+        Abr::ObjectLockRetention retention;
+        std::string reason;
+
+        EXPECT_TRUE(Manager::resolveRetentionUntil(effective, Abr::ImmutabilityMode::COMPLIANCE,
+                                                   atSeconds(kSecondsNow + 30 * kSecondsPerDay + 1),
+                                                   atSeconds(kSecondsNow), retention, reason));
+        EXPECT_EQ(retention.m_mode, Abr::ImmutabilityMode::COMPLIANCE);
+        EXPECT_EQ(retention.m_retainUntil.Millis(), (kSecondsNow + 30 * kSecondsPerDay + 1) * 1000);
+        EXPECT_TRUE(reason.empty());
+    }
+
+    TEST(ResolveRetentionUntil, RefusesAModeTheBucketCannotHold)
+    {
+        Abr::ObjectLockRetention retention;
+        std::string reason;
+
+        EXPECT_FALSE(Manager::resolveRetentionUntil(resolved(Abr::ObjectLockSettings()),
+                                                    Abr::ImmutabilityMode::GOVERNANCE,
+                                                    atSeconds(kSecondsNow + kSecondsPerDay),
+                                                    atSeconds(kSecondsNow), retention, reason));
+        EXPECT_EQ(reason, "does not support governance immutability");
+        EXPECT_EQ(retention.m_mode, Abr::ImmutabilityMode::NONE);
+    }
+
+    TEST(ResolveRetentionUntil, RefusesAMomentAlreadyReached)
+    {
+        // S3 refuses a retain-until date in the past, and the moment itself would hold nothing either.
+        const auto effective = resolved(lockedWith(Abr::ImmutabilityMode::GOVERNANCE, 30));
+        Abr::ObjectLockRetention retention;
+        std::string reason;
+
+        EXPECT_FALSE(Manager::resolveRetentionUntil(effective, Abr::ImmutabilityMode::GOVERNANCE,
+                                                    atSeconds(kSecondsNow), atSeconds(kSecondsNow),
+                                                    retention, reason));
+        EXPECT_EQ(reason, "cannot hold a backup in governance mode until 2023-11-14T22:13:20Z, "
+                          "which has already passed");
+
+        EXPECT_FALSE(Manager::resolveRetentionUntil(effective, Abr::ImmutabilityMode::GOVERNANCE,
+                                                    atSeconds(kSecondsNow - 1), atSeconds(kSecondsNow),
+                                                    retention, reason));
+        EXPECT_EQ(retention.m_mode, Abr::ImmutabilityMode::NONE);
+    }
+
+    TEST(ResolveRetentionUntil, WritesNoRetentionWhenNoneWasAskedFor)
+    {
+        const auto effective = resolved(lockedWith(Abr::ImmutabilityMode::COMPLIANCE, 30));
+        Abr::ObjectLockRetention retention;
+        std::string reason;
+
+        EXPECT_TRUE(Manager::resolveRetentionUntil(effective, Abr::ImmutabilityMode::NONE,
+                                                   atSeconds(kSecondsNow - 1), atSeconds(kSecondsNow),
+                                                   retention, reason));
+        EXPECT_EQ(retention.m_mode, Abr::ImmutabilityMode::NONE);
+        EXPECT_TRUE(reason.empty());
+    }
+
+    TEST(ResolveBackupRetention, TakesTheNamedMomentOverThePeriod)
+    {
+        // A backup that names both gets the moment, to the second, and not the clock plus the days.
+        const auto effective = resolved(lockedWith(Abr::ImmutabilityMode::GOVERNANCE, 7));
+        const int64_t until = Aws::Utils::DateTime::Now().Millis() / 1000 + 90 * kSecondsPerDay;
+        Abr::ObjectLockRetention retention;
+        std::string reason;
+
+        auto info = backupAsking(Abr::ImmutabilityMode::GOVERNANCE, 30);
+        info.m_immutabilityUntil = until;
+
+        EXPECT_TRUE(Manager::resolveBackupRetention(effective, info, retention, reason));
+        EXPECT_EQ(retention.m_mode, Abr::ImmutabilityMode::GOVERNANCE);
+        EXPECT_EQ(retention.m_retainUntil.Millis(), until * 1000);
+    }
+
+    TEST(ResolveBackupRetention, RefusesANamedMomentAlreadyPassed)
+    {
+        const auto effective = resolved(lockedWith(Abr::ImmutabilityMode::GOVERNANCE, 7));
+        Abr::ObjectLockRetention retention;
+        std::string reason;
+
+        auto info = backupAsking(Abr::ImmutabilityMode::GOVERNANCE, 0);
+        info.m_immutabilityUntil = kSecondsNow;
+
+        EXPECT_FALSE(Manager::resolveBackupRetention(effective, info, retention, reason));
+        EXPECT_EQ(reason, "cannot hold a backup in governance mode until 2023-11-14T22:13:20Z, "
+                          "which has already passed");
+    }
+
     // ---- what is left of a retention -------------------------------------
 
     // The retention read back off a stored backup is a date; what the tools

@@ -126,6 +126,9 @@ namespace Abr
         bool updateRetention(const std::string &path, const std::string &name,
                      ImmutabilityMode mode, int days) override;
 
+        bool updateRetentionUntil(const std::string &path, const std::string &name,
+                     ImmutabilityMode mode, int64_t retainUntil) override;
+
         bool isExistingFile(const std::string &path) const;
 
         bool deleteFile(const std::string &path);
@@ -163,6 +166,14 @@ namespace Abr
         // have to land on the same retention for the same request.
         static bool resolveRetention(const BackupFolderInfo &effective, ImmutabilityMode mode, int days,
                                      ObjectLockRetention &retention, std::string &reason);
+
+        // The same, for a retention that ends at a moment named outright rather than after a period.
+        // A moment that is not after `now` would hold nothing, and S3 refuses it, so it is refused
+        // here. Takes the clock as an argument for the same reason retentionDaysLeft() does.
+        static bool resolveRetentionUntil(const BackupFolderInfo &effective, ImmutabilityMode mode,
+                                          const Aws::Utils::DateTime &retainUntil,
+                                          const Aws::Utils::DateTime &now,
+                                          ObjectLockRetention &retention, std::string &reason);
 
         // The retention left on an object, counted in the days the tools report.
         // Any part of a day still holds the object, so a remainder counts as a
@@ -215,6 +226,10 @@ namespace Abr
         // applyRetention(), which stamps one on the way in, this is what changes
         // the retention of a stored object.
         bool putObjectRetention(const std::string &key, const ObjectLockRetention &retention);
+
+        // Writes a retention onto every object one stored backup is made of.
+        bool putBackupRetention(const std::string &path, const std::string &name,
+                                const ObjectLockRetention &retention);
 
         Aws::S3::S3Client *m_s3_client;
 

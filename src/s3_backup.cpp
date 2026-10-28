@@ -226,6 +226,18 @@ namespace
     {
         return std::to_string(days) + " day(s)";
     }
+
+    // Whether the bucket can hold an object in the mode at all, which both kinds of retention ask first.
+    bool supportsRetentionMode(const Abr::BackupFolderInfo &effective, Abr::ImmutabilityMode mode,
+                               std::string &reason)
+    {
+        if (effective.m_immutabilitySupported < mode) {
+            reason = std::string("does not support ") + Abr::immutabilityModeName(mode)
+                + " immutability";
+            return false;
+        }
+        return true;
+    }
 }
 
 const char *Abr::immutabilityModeName(ImmutabilityMode mode)
@@ -317,6 +329,11 @@ bool Abr::S3BackupManager::honoursImmutabilityRequest(const BackupFolderInfo &ef
 bool Abr::S3BackupManager::resolveBackupRetention(const BackupFolderInfo &effective, const BackupInfo &info,
                                                   ObjectLockRetention &retention, std::string &reason)
 {
+    if (info.m_immutabilityUntil != 0) {
+        return resolveRetentionUntil(effective, info.m_immutabilityMode,
+                                     Aws::Utils::DateTime(info.m_immutabilityUntil * 1000),
+                                     Aws::Utils::DateTime::Now(), retention, reason);
+    }
     return resolveRetention(effective, info.m_immutabilityMode, info.m_immutabilityDays, retention, reason);
 }
 
@@ -332,9 +349,7 @@ bool Abr::S3BackupManager::resolveRetention(const BackupFolderInfo &effective, I
         return true;
     }
 
-    if (effective.m_immutabilitySupported < mode) {
-        reason = std::string("does not support ") + immutabilityModeName(mode)
-            + " immutability";
+    if (!supportsRetentionMode(effective, mode, reason)) {
         return false;
     }
 
@@ -349,6 +364,36 @@ bool Abr::S3BackupManager::resolveRetention(const BackupFolderInfo &effective, I
     retention.m_mode = mode;
     retention.m_retainUntil = Aws::Utils::DateTime::Now()
         + std::chrono::milliseconds(static_cast<int64_t>(days) * 24 * 60 * 60 * 1000);
+
+    return true;
+}
+
+bool Abr::S3BackupManager::resolveRetentionUntil(const BackupFolderInfo &effective, ImmutabilityMode mode,
+                                                 const Aws::Utils::DateTime &retainUntil,
+                                                 const Aws::Utils::DateTime &now,
+                                                 ObjectLockRetention &retention, std::string &reason)
+{
+    retention = ObjectLockRetention();
+    reason.clear();
+
+    if (mode == ImmutabilityMode::NONE) {
+        return true;
+    }
+
+    if (!supportsRetentionMode(effective, mode, reason)) {
+        return false;
+    }
+
+    // A moment already reached holds the backup for no time at all, the same as a mode without a period.
+    if (retainUntil.Millis() <= now.Millis()) {
+        reason = std::string("cannot hold a backup in ") + immutabilityModeName(mode)
+            + " mode until " + retainUntil.ToGmtString(Aws::Utils::DateFormat::ISO_8601).c_str()
+            + ", which has already passed";
+        return false;
+    }
+
+    retention.m_mode = mode;
+    retention.m_retainUntil = retainUntil;
 
     return true;
 }
@@ -811,6 +856,32 @@ bool Abr::S3BackupManager::updateRetention(const std::string &path, const std::s
         return false;
     }
 
+    return putBackupRetention(path, name, retention);
+}
+
+bool Abr::S3BackupManager::updateRetentionUntil(const std::string &path, const std::string &name,
+                                                ImmutabilityMode mode, int64_t retainUntil)
+{
+    if (mode == ImmutabilityMode::NONE) {
+        std::cerr << "Error: a stored backup cannot be released from immutability" << std::endl;
+        return false;
+    }
+
+    ObjectLockRetention retention;
+    std::string reason;
+
+    if (!resolveRetentionUntil(getFolderInfo(), mode, Aws::Utils::DateTime(retainUntil * 1000),
+                               Aws::Utils::DateTime::Now(), retention, reason)) {
+        std::cerr << "Error: '" << m_folder << "' " << reason << std::endl;
+        return false;
+    }
+
+    return putBackupRetention(path, name, retention);
+}
+
+bool Abr::S3BackupManager::putBackupRetention(const std::string &path, const std::string &name,
+                                              const ObjectLockRetention &retention)
+{
     const std::string baseName = join_backup_path(path, name);
 
     // Every object the backup is made of has to end up under the same

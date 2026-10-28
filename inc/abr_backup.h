@@ -43,6 +43,11 @@ namespace Abr
 
         int m_immutabilityDays; // retention period of the backup, in days, if any
 
+        // The moment the retention of the backup ends, in seconds since the Unix epoch (UTC), if any.
+        // When set it takes the place of m_immutabilityDays, so that a caller holding several backups
+        // until the same moment gets the same date on all of them, however long each one takes to write.
+        int64_t m_immutabilityUntil;
+
         uint64_t orig_data_size; // total size of the original data in bytes
 
         uint64_t stored_data_size; // total size of the stored and optionally compressed data in bytes
@@ -137,6 +142,12 @@ namespace Abr
         // given mode and period, the period counted from now. Storage that
         // holds nothing immutable has no retention to change and refuses.
         virtual bool updateRetention(const std::string &, const std::string &, ImmutabilityMode, int)
+        {
+            return false;
+        }
+
+        // The same, held until the given moment, in seconds since the Unix epoch (UTC).
+        virtual bool updateRetentionUntil(const std::string &, const std::string &, ImmutabilityMode, int64_t)
         {
             return false;
         }
