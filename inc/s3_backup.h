@@ -79,6 +79,17 @@ namespace Abr
         Aws::Utils::DateTime m_retainUntil;
     };
 
+    //
+    // What became of a retention put on one stored object. An object that is not there is told apart
+    // from a refusal, since a name may rightly hold only some of the objects a backup is made of.
+    //
+    enum class RetentionOutcome
+    {
+        HELD,
+        MISSING,
+        FAILED
+    };
+
     // The name of a mode as the tools spell it: none, governance or compliance.
     const char *immutabilityModeName(ImmutabilityMode mode);
 
@@ -183,6 +194,15 @@ namespace Abr
         static int retentionDaysLeft(const Aws::Utils::DateTime &retainUntil,
                                      const Aws::Utils::DateTime &now);
 
+        // Answers whether a retention put on the objects under one name holds what the name stands for.
+        // The index decides, as it does when a backup is opened: with it the name is a backup, whose data
+        // has to be held as well; without it the name holds only the metadata blob meta_save wrote, which a
+        // caller may keep on its own, a manifest of a whole VM next to the backups of its disks for one.
+        // `data` is not looked at without an index. On a refusal `reason` is left holding what is missing,
+        // as a phrase to report after the backup's location, or empty when the storage already said why.
+        static bool honoursBackupRetention(RetentionOutcome index, RetentionOutcome data, RetentionOutcome meta,
+                                           std::string &reason);
+
         // Stamps a retention onto an upload request. PutObject and
         // CreateMultipartUpload take it the same way, which is what the template
         // is for; an uploaded part carries no retention of its own, the upload
@@ -224,10 +244,12 @@ namespace Abr
 
         // Writes a retention onto an object that already exists. Unlike
         // applyRetention(), which stamps one on the way in, this is what changes
-        // the retention of a stored object.
-        bool putObjectRetention(const std::string &key, const ObjectLockRetention &retention);
+        // the retention of a stored object. An object that is not there is
+        // reported as MISSING and left to the caller to judge.
+        RetentionOutcome putObjectRetention(const std::string &key, const ObjectLockRetention &retention);
 
-        // Writes a retention onto every object one stored backup is made of.
+        // Writes a retention onto every object stored under one name: a backup with its metadata, if any,
+        // or the metadata alone.
         bool putBackupRetention(const std::string &path, const std::string &name,
                                 const ObjectLockRetention &retention);
 

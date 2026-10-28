@@ -258,6 +258,8 @@ If even that cleanup fails, the library reports that the partial backup has to b
 The metadata blob is stored and returned byte for byte through `meta_save` and `meta_load`.
 It is written separately from the backup, has no header or checksum, is not encrypted, and is not carried over by
 `copy`.
+A name may hold the metadata alone, without `.abrd` and `.abri`, for example a manifest of a whole VM stored next to
+the backups of its disks.
 Consumers that store JSON in it own that schema.
 
 ## Immutability (S3 Object Lock)
@@ -266,6 +268,8 @@ Retention is a property of the storage, not of the format: the index header has 
 On a bucket with Object Lock, `.abrd` and `.abri` are written with the requested mode, `GOVERNANCE` or `COMPLIANCE`,
 and a retain-until date.
 `retention` later applies the same hold to all three objects, including `.abrm` when it exists.
+The `.abri` object decides what a name holds: with it, `.abrd` must be there as well; without it, the name holds only
+metadata, and `.abrm` alone is held.
 Readers report the retention found on the `.abri` object as the backup's retention.
 
 ## Reading a backup

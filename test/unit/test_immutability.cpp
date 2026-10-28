@@ -479,6 +479,57 @@ namespace
                           "which has already passed");
     }
 
+    // ---- what a name holds once its retention is put ----------------------
+
+    // 'retention' is also run on a name that holds only metadata, a manifest of a whole VM saved next to
+    // the backups of its disks. The index decides which of the two a name is.
+    using Outcome = Abr::RetentionOutcome;
+
+    TEST(HonoursBackupRetention, HoldsABackupWithAndWithoutMetadata)
+    {
+        std::string reason;
+
+        EXPECT_TRUE(Manager::honoursBackupRetention(Outcome::HELD, Outcome::HELD, Outcome::HELD, reason));
+        EXPECT_TRUE(Manager::honoursBackupRetention(Outcome::HELD, Outcome::HELD, Outcome::MISSING, reason));
+        EXPECT_TRUE(reason.empty());
+    }
+
+    TEST(HonoursBackupRetention, HoldsMetadataStoredOnItsOwn)
+    {
+        std::string reason;
+
+        EXPECT_TRUE(Manager::honoursBackupRetention(Outcome::MISSING, Outcome::MISSING, Outcome::HELD, reason));
+        EXPECT_TRUE(reason.empty());
+    }
+
+    TEST(HonoursBackupRetention, RefusesANameThatHoldsNothing)
+    {
+        std::string reason;
+
+        EXPECT_FALSE(Manager::honoursBackupRetention(Outcome::MISSING, Outcome::MISSING, Outcome::MISSING, reason));
+        EXPECT_EQ(reason, "holds neither a backup nor metadata");
+    }
+
+    TEST(HonoursBackupRetention, RefusesAnIndexWithoutData)
+    {
+        std::string reason;
+
+        EXPECT_FALSE(Manager::honoursBackupRetention(Outcome::HELD, Outcome::MISSING, Outcome::HELD, reason));
+        EXPECT_EQ(reason, "has an index but no data, so it is not a backup that can be restored");
+    }
+
+    TEST(HonoursBackupRetention, FailsWhenTheStorageRefusesAnyObject)
+    {
+        // The storage has already said why, so there is nothing to add to it.
+        std::string reason;
+
+        EXPECT_FALSE(Manager::honoursBackupRetention(Outcome::FAILED, Outcome::HELD, Outcome::HELD, reason));
+        EXPECT_FALSE(Manager::honoursBackupRetention(Outcome::HELD, Outcome::FAILED, Outcome::MISSING, reason));
+        EXPECT_FALSE(Manager::honoursBackupRetention(Outcome::HELD, Outcome::HELD, Outcome::FAILED, reason));
+        EXPECT_FALSE(Manager::honoursBackupRetention(Outcome::MISSING, Outcome::MISSING, Outcome::FAILED, reason));
+        EXPECT_TRUE(reason.empty());
+    }
+
     // ---- what is left of a retention -------------------------------------
 
     // The retention read back off a stored backup is a date; what the tools

@@ -809,7 +809,7 @@ bool Abr::S3BackupManager::deleteBackup(const std::string &path, const std::stri
 //
 // What the storage is told to hold one object under from now on.
 //
-bool Abr::S3BackupManager::putObjectRetention(const std::string &key, const ObjectLockRetention &retention)
+Abr::RetentionOutcome Abr::S3BackupManager::putObjectRetention(const std::string &key, const ObjectLockRetention &retention)
 {
     Aws::S3::Model::ObjectLockRetention lock;
     lock.SetMode(retention.m_mode == ImmutabilityMode::COMPLIANCE
@@ -825,17 +825,23 @@ bool Abr::S3BackupManager::putObjectRetention(const std::string &key, const Obje
     auto outcome = m_s3_client->PutObjectRetention(request);
 
     if (outcome.IsSuccess()) {
-        return true;
+        return RetentionOutcome::HELD;
+    }
+
+    // Asking for the object first would not do: a failed HEAD read as "not there" would leave a real
+    // backup unprotected without a word, so only the storage's own answer to the request itself counts.
+    auto err = outcome.GetError();
+    if (err.GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND) {
+        return RetentionOutcome::MISSING;
     }
 
     // What a target refuses here is its own rule to state -- a compliance
     // period may only ever be extended, and a governance one may not be
     // shortened without the permission to bypass it -- so the refusal is
     // reported as it was given rather than guessed at beforehand.
-    auto err = outcome.GetError();
     std::cerr << "Error: putObjectRetention: '" << key << "': "
               << err.GetExceptionName() << ": " << err.GetMessage() << std::endl;
-    return false;
+    return RetentionOutcome::FAILED;
 }
 
 bool Abr::S3BackupManager::updateRetention(const std::string &path, const std::string &name,
@@ -887,15 +893,48 @@ bool Abr::S3BackupManager::putBackupRetention(const std::string &path, const std
     // Every object the backup is made of has to end up under the same
     // retention: one left on a shorter period would let the backup be taken
     // apart before the period the others are held for is out.
-    bool dataHeld = putObjectRetention(baseName + Abr::DATA_FILE_EXT, retention);
-    bool indexHeld = putObjectRetention(baseName + Abr::INDEX_FILE_EXT, retention);
+    const RetentionOutcome index = putObjectRetention(baseName + Abr::INDEX_FILE_EXT, retention);
+
+    // Without an index there is no backup to hold. A data object left there by a run that died before
+    // its index was written is not one either, and holding it would only keep the leftover from being
+    // cleaned up.
+    const RetentionOutcome data = index == RetentionOutcome::MISSING
+        ? RetentionOutcome::MISSING
+        : putObjectRetention(baseName + Abr::DATA_FILE_EXT, retention);
 
     // The metadata blob is written by a command of its own, so a backup that
     // was never given one has nothing to hold under that key.
-    const std::string metaKey = baseName + Abr::META_FILE_EXT;
-    bool metaHeld = !isExistingFile(metaKey) || putObjectRetention(metaKey, retention);
+    const RetentionOutcome meta = putObjectRetention(baseName + Abr::META_FILE_EXT, retention);
 
-    return dataHeld && indexHeld && metaHeld;
+    std::string reason;
+    if (!honoursBackupRetention(index, data, meta, reason)) {
+        if (!reason.empty()) {
+            std::cerr << "Error: '" << join_backup_path(m_folder, baseName) << "' " << reason << std::endl;
+        }
+        return false;
+    }
+    return true;
+}
+
+bool Abr::S3BackupManager::honoursBackupRetention(RetentionOutcome index, RetentionOutcome data,
+                                                  RetentionOutcome meta, std::string &reason)
+{
+    reason.clear();
+
+    if (index == RetentionOutcome::MISSING) {
+        if (meta == RetentionOutcome::MISSING) {
+            reason = "holds neither a backup nor metadata";
+            return false;
+        }
+        return meta == RetentionOutcome::HELD;
+    }
+
+    if (data == RetentionOutcome::MISSING) {
+        reason = "has an index but no data, so it is not a backup that can be restored";
+        return false;
+    }
+
+    return index == RetentionOutcome::HELD && data == RetentionOutcome::HELD && meta != RetentionOutcome::FAILED;
 }
 
 bool Abr::S3BackupManager::abortPendingUploads(const std::string &key)
