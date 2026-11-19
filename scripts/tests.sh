@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2026 Norvitex OÜ
+# Copyright © 2026 Norvitex OÜ (AltaStor.com)
 #
 # Exercises the AltaStor backup library through the btest utility.
 #
