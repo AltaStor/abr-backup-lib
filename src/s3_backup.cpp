@@ -32,6 +32,15 @@
 #include <aws/s3/model/ListMultipartUploadsRequest.h>
 #include <aws/core/utils/stream/PreallocatedStreamBuf.h>
 
+namespace
+{
+    // Long enough for TCP to send a lost SYN again after 1 and 3 s. With the SDK's three attempts, an endpoint that
+    // does not answer still fails within the 30 s callers give a listing.
+    constexpr long kS3ConnectTimeoutMs = 5000;
+    // How long a request may go without data before it is tried again.
+    constexpr long kS3RequestTimeoutMs = 30000;
+}
+
 namespace Abr
 {
     //
@@ -164,6 +173,11 @@ bool Abr::S3BackupManager::initialize(const Abr::BackupManagerParams& params)
     }
 
     config.verifySSL = m_params.m_verifyTls;
+
+    // The SDK gives up on a connection after 1 s, before TCP sends a lost SYN again, so one dropped packet failed
+    // an attempt, and a stall of a few seconds failed all three the SDK makes.
+    config.connectTimeoutMs = kS3ConnectTimeoutMs;
+    config.requestTimeoutMs = kS3RequestTimeoutMs;
 
     std::shared_ptr<Aws::Auth::AWSCredentialsProvider> credentialsProvider;
 
