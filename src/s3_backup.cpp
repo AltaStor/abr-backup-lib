@@ -8,8 +8,10 @@
 #include "abr_backup_format.h"
 #include "backup_core.h"
 
+#include <algorithm>
 #include <chrono>
 #include <iostream>
+#include <iterator>
 
 #include <aws/core/auth/AWSCredentialsProviderChain.h>
 #include <aws/core/auth/AWSCredentialsProvider.h>
@@ -723,10 +725,8 @@ bool Abr::S3BackupManager::loadMetaData(const std::string &path, const std::stri
     request.SetBucket(getFolder());
     request.SetKey(fullPath);
     
-    request.SetResponseStreamFactory([&metaData]() {
-        return Aws::New<Aws::IOStream>("GetObjectResponseStream", metaData.rdbuf());
-    });
-
+    // The SDK's own response stream, new for each of its attempts, so that an attempt that failed midway leaves
+    // nothing behind in metaData.
     auto outcome = m_s3_client->GetObject(request);
 
     if (!outcome.IsSuccess()) {
@@ -734,6 +734,13 @@ bool Abr::S3BackupManager::loadMetaData(const std::string &path, const std::stri
         return false;
     }
 
+    auto& body = outcome.GetResult().GetBody();
+    const auto written = std::copy(std::istreambuf_iterator<char>(body), std::istreambuf_iterator<char>(),
+                                   std::ostreambuf_iterator<char>(metaData));
+    if (written.failed()) {
+        std::cerr << "Error: failed to write the metadata of '" << fullPath << "'" << std::endl;
+        return false;
+    }
     return true;
 }
 
@@ -1253,7 +1260,12 @@ bool Abr::S3Restore::readFile(Handle hFile, void *pDataBuf, uint64_t offset, uin
     std::string range = "bytes=" + std::to_string(offset) + "-" + std::to_string(offset + dataLength - 1);
     request.SetRange(range);
 
+    // Each of the SDK's attempts writes from the start of the buffer, also after one that failed midway, and an
+    // error body is read from where it was written. PreallocatedStreamBuf moves a position only when asked for that
+    // one alone.
     request.SetResponseStreamFactory([&streambuf]() {
+        streambuf.pubseekpos(0, std::ios_base::out);
+        streambuf.pubseekpos(0, std::ios_base::in);
         return Aws::New<Aws::IOStream>("", &streambuf);
     });
 
