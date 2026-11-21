@@ -4,6 +4,7 @@
 // AltaStor file backup implementation
 //
 
+#include <cerrno>
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -91,6 +92,13 @@ namespace
     // rw-r----- : the data files need no exec bit, and must never be readable by others
     constexpr fs::perms BACKUP_FILE_PERMS =
         fs::perms::owner_read | fs::perms::owner_write | fs::perms::group_read;
+
+    // What errno says about a failed stream operation. The C++ streams do not promise errno, but the C library
+    // under them sets it on the call that failed.
+    std::string errnoText(int error)
+    {
+        return error ? std::generic_category().message(error) : std::string("unknown error");
+    }
 
     std::string permsToOctal(fs::perms perms)
     {
@@ -335,7 +343,12 @@ bool Abr::FileBackupManager::saveMetaData(const std::string &path, const std::st
     // which is exactly what empty metadata does; only badbit signals a real
     // write error. Treating the empty case as a failure used to report an error
     // after the open had already truncated any previously stored metadata.
-    if (file->bad()) {
+    // Closing can fail too, when a network share could not take what the kernel
+    // still held for the file.
+    const bool written = !file->bad();
+    file->clear();
+    file->close();
+    if (!written || file->fail()) {
         std::cerr << "Failed to write metadata to '" << filePath << "'!" << std::endl;
         return false;
     }
@@ -409,10 +422,11 @@ Handle Abr::FileBackup::createFile(const std::string &fullName, bool partialWrit
         }
     }
 
+    errno = 0;
     WriteFileHandle *pFile = new WriteFileHandle(path);
 
     if (!pFile || pFile->fail()) {
-        std::cerr << "Failed to create file '" << path << "'!\n";
+        std::cerr << "Error: failed to create file '" << path << "': " << errnoText(errno) << std::endl;
         if (pFile) {
             delete pFile;
         }
@@ -442,14 +456,14 @@ bool Abr::FileBackup::writeFile(Handle hFile, void *pDataBuf, uint32_t dataLengt
         return false;
     }
 
-    std::streampos posBefore = pFile->tellp();
+    // A failed write leaves the stream without a position, so its state tells, and errno why. The stream may also
+    // fail here on data an earlier call left in its buffer.
+    errno = 0;
+    pFile->write(static_cast<const char *>(pDataBuf), dataLength);
 
-    pFile->write((char*)pDataBuf, dataLength);
-
-    uint32_t written = pFile->tellp() - posBefore;
-
-    if (written != dataLength) {
-        std::cerr << "Write error, expected " << dataLength << " bytes, written " << written << " bytes!" << std::endl;
+    if (!*pFile) {
+        std::cerr << "Error: writing " << dataLength << " bytes to '" << pFile->m_filename << "' failed: "
+                  << errnoText(errno) << std::endl;
         return false;
     }
 
@@ -464,7 +478,11 @@ bool Abr::FileBackup::closeFile(Handle hFile, bool bDelete)
         return true;
     }
 
+    // Closing writes back what the kernel still holds for the file. On a network share that write can fail after
+    // every write() succeeded, and only the close reports it, so a failed close loses data.
     pFile->close();
+    const bool closed = !pFile->fail();
+    const int closeError = errno;
 
     std::filesystem::path filePath = pFile->m_filename;
 
@@ -472,7 +490,14 @@ bool Abr::FileBackup::closeFile(Handle hFile, bool bDelete)
 
     // Report a failed delete: the caller is discarding a partial backup and has to
     // know that something of it is still in the repository.
-    return bDelete ? removeRepositoryFile(filePath) : true;
+    if (bDelete) {
+        return removeRepositoryFile(filePath);
+    }
+    if (!closed) {
+        std::cerr << "Error: writing '" << filePath.string() << "' failed when it was closed: "
+                  << errnoText(closeError) << std::endl;
+    }
+    return closed;
 }
 
 bool Abr::FileBackup::deleteFile(const std::string &fullName)
@@ -484,10 +509,11 @@ Handle Abr::FileRestore::openFile(const std::string &fullName)
 {
     std::string path = m_pManager->getFolder() + "/" + fullName;
 
+    errno = 0;
     std::ifstream *pFile = new std::ifstream(path, std::ios::in | std::ios::binary);
 
     if (!pFile || pFile->fail()) {
-        std::cerr << "Failed to open file '" << path << "'!\n";
+        std::cerr << "Failed to open file '" << path << "': " << errnoText(errno) << "\n";
         delete pFile;
         return nullptr;
     }
@@ -512,10 +538,14 @@ bool Abr::FileRestore::readFile(Handle hFile, void *pDataBuf, uint64_t offset, u
         pFile->seekg(offset);
     }
 
+    errno = 0;
     pFile->read((char*)pDataBuf, dataLength);
 
     if (pFile->gcount() != dataLength) {
-        std::cerr << "Error reading file, expected " << dataLength << " bytes, got " << pFile->gcount() << " bytes!" << std::endl;
+        const int error = errno;
+        std::cerr << "Error: reading " << dataLength << " bytes at " << offset << " failed, after "
+                  << pFile->gcount() << " bytes: " << (pFile->eof() ? "the file ends there" : errnoText(error))
+                  << std::endl;
         return false;
     }
 
