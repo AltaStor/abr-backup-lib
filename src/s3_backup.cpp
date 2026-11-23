@@ -15,6 +15,7 @@
 
 #include <aws/core/auth/AWSCredentialsProviderChain.h>
 #include <aws/core/auth/AWSCredentialsProvider.h>
+#include <aws/core/http/HttpResponse.h>
 #include <aws/core/http/HttpTypes.h>
 #include <aws/s3/model/GetObjectRequest.h>
 #include <aws/s3/model/ListObjectsV2Request.h>
@@ -552,6 +553,15 @@ bool Abr::S3BackupManager::ensureBucket()
     auto headOutcome = m_s3_client->HeadBucket(headRequest);
     if (headOutcome.IsSuccess()) {
         return true;
+    }
+
+    // No answer at all says nothing about the bucket, so it is not created then: the reason is the network, and
+    // the attempt to create it would only fail the same way and hide that.
+    if (headOutcome.GetError().GetResponseCode() == Aws::Http::HttpResponseCode::REQUEST_NOT_MADE) {
+        std::cerr << "S3 bucket '" << m_folder << "' is not accessible"
+                  << (m_params.m_serverUrl.empty() ? "" : (" at endpoint " + m_params.m_serverUrl))
+                  << ": " << headOutcome.GetError().GetMessage() << std::endl;
+        return false;
     }
 
     if (!m_params.m_createFolderIfMissing) {
