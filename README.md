@@ -156,6 +156,15 @@ scripts/tests.sh --build            # configure, build, and run
 ABR_TEST_S3_BUCKET=my-bucket scripts/tests.sh   # also exercise the S3 backend
 ```
 
-## License
+## Authors and license
 
-Apache License 2.0 — see [LICENSE](LICENSE).
+abr-backup-lib is developed by [AltaStor.com](https://altastor.com), copyright © 2026 Norvitex OÜ.
+It is licensed under the [Apache License, Version 2.0](LICENSE), marked in the source files with an
+`SPDX-License-Identifier: Apache-2.0` line.
+A redistribution keeps the attribution in [NOTICE](NOTICE).
+
+The dependencies keep their own licenses: 
+- the AWS SDK for C++ and OpenSSL 3 under Apache 2.0,
+- Zstd under BSD-3-Clause,
+- Crc32c under BSD-3-Clause, which also covers the copy bundled in [third_party/crc32c](third_party/crc32c).
+- GoogleTest, under BSD-3-Clause, is used by the unit tests only and is not linked into the library.

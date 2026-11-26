@@ -1,3 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright © 2026 Norvitex OÜ (AltaStor.com)
+#
+# abr-backup-lib: the .abr backup format and its file and S3 storage, built as the backuplib static library
+
 cmake_minimum_required(VERSION 3.20)
 
 project(abr-backup-lib LANGUAGES CXX)

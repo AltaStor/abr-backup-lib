@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright © 2026 Norvitex OÜ (AltaStor.com)
+#
 # AltaStor backup library unit tests
 
 # Prefer a GoogleTest that is already installed; fall back to a pinned release,
